@@ -25,7 +25,16 @@ fn main() {
     );
     eprintln!("[cdp-prober] GET {url}");
 
-    match ureq::get(&url).timeout(Duration::from_secs(15)).call() {
+    // native-tls = OS のシステム CA を使う。CCoW egress gateway の MITM CA は
+    // システム store にだけ在るため、これが無いと UnknownIssuer で弾かれる (#12 M1)。
+    let agent = ureq::builder()
+        .tls_connector(std::sync::Arc::new(
+            native_tls::TlsConnector::new().expect("native-tls init"),
+        ))
+        .timeout(Duration::from_secs(15))
+        .build();
+
+    match agent.get(&url).call() {
         Ok(resp) => {
             println!("status: {}", resp.status());
             println!("body:\n{}", resp.into_string().unwrap_or_default());
