@@ -33,6 +33,7 @@ Cloudflare Worker+DO + stateless MCP)。
 - `/cmd` の pending Map は in-memory で良い。/cmd の Promise 待ち中は DO がアクティブなので
   WS 往復は同一インスタンスで閉じる (hibernate しない)。
 - **secret を会話 / log / tool param に出さない**。`secret-inject` skill で `RELAY_TOKEN` を投入。
+- **CCoW 内で cloudflared (cf tunnel) を立てて公開 URL から繋ぐ案は却下済み** (#10)。cloudflared は edge に UDP/TCP 7844 で接続するが CCoW egress は TCP/443 のみ。`HTTPS_PROXY` 経由の edge 接続も未対応。「拡張 → WSS/443 → Worker+DO」の dial-out 形が唯一通る。
 
 ## ビルド / テスト
 
