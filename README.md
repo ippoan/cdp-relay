@@ -15,6 +15,7 @@ CCoW コンテナで実測済み (再検証不要):
 | 手元 Chrome への直 CDP (Tailscale IP) | ❌ タイムアウト (CCoW は Tailscale 網外) |
 | UDP アウトバウンド (STUN) | ❌ 封鎖 (WebRTC P2P も不可) |
 | TCP/443 アウトバウンド (WSS) | ✅ 通る |
+| cloudflared (cf tunnel, :7844) で CCoW 内サーバを公開 | ❌ edge に届かない (UDP/7844・TCP/7844 とも CCoW egress で落ちる、`HTTPS_PROXY` も非対応) |
 
 CDP は「Chrome がリッスン側 / 操作側がクライアント」。CCoW → 手元 Chrome へ入るには
 NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbound を中継で合流**させる。
