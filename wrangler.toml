@@ -19,12 +19,20 @@ head_sampling_rate = 1
 
 # ─── Secrets ────────────────────────────────────────────────────────────────
 # RELAY_TOKEN: 拡張 WS (/ext) と MCP (/mcp) の唯一の関門。CDP は無認証なので
-# これが漏れると任意 JS eval = ブラウザ乗っ取り。secret-inject skill で投入する:
-#   openssl rand -hex 32 | bash ~/.claude/skills/secret-inject/scripts/inject-secret.sh \
-#     CDP_RELAY_TOKEN --targets cf
-# 投入後 `wrangler secret put RELAY_TOKEN` で worker binding に設定する。
+# これが漏れると任意 JS eval = ブラウザ乗っ取り。
+#
+# scaffold 段階では未 provision なので required は空にしておく。secret-verify は
+# `[secrets] required` の宣言名が GCP Secret Manager に存在するかを突合するため、
+# 未投入の名前を宣言すると CI が fail する (= 投入してから宣言する規約)。
+# worker を実利用する前に、値を一切露出しない secret-inject skill で投入し、
+# その後この required に "RELAY_TOKEN" を戻す (= secret-verify で投入漏れを検出):
+#   1. GCP(SoT): openssl rand -hex 32 | \
+#        bash ~/.claude/skills/secret-inject/scripts/inject-secret.sh RELAY_TOKEN --targets gcp
+#   2. deploy 後に worker secret 設定 (GCP と同値): npx wrangler secret put RELAY_TOKEN
+#   3. この required に "RELAY_TOKEN" を戻して再 PR
+# worker は RELAY_TOKEN 未設定なら fail-closed (全 503) なので未投入でも安全。
 [secrets]
-required = ["RELAY_TOKEN"]
+required = []
 
 # ─── 設定値 (文字列 vars。未設定なら src/env.ts の default) ───────────────────
 [vars]
