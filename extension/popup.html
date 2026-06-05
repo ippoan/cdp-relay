@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { width: 320px; font: 13px/1.5 system-ui, sans-serif; margin: 0; padding: 12px; }
+      h1 { font-size: 14px; margin: 0 0 8px; }
+      label { display: block; margin: 6px 0 2px; font-weight: 600; }
+      input, select { width: 100%; box-sizing: border-box; padding: 4px 6px; }
+      .row { margin-bottom: 6px; }
+      .btns { display: flex; gap: 8px; margin-top: 10px; }
+      button { flex: 1; padding: 6px; cursor: pointer; }
+      #status { margin-top: 10px; padding: 6px; border-radius: 4px; background: #8881; font-size: 12px; word-break: break-all; }
+      .ok { color: #00875a; }
+      .err { color: #c9372c; }
+    </style>
+  </head>
+  <body>
+    <h1>cdp-relay</h1>
+    <div class="row">
+      <label for="relayUrl">Relay URL</label>
+      <input id="relayUrl" placeholder="https://cdp-relay.example.workers.dev" />
+    </div>
+    <div class="row">
+      <label for="session">Session</label>
+      <input id="session" placeholder="my-laptop" />
+    </div>
+    <div class="row">
+      <label for="token">Token</label>
+      <input id="token" type="password" placeholder="(pair flow で渡された token)" />
+    </div>
+    <div class="row">
+      <label for="tab">対象タブ</label>
+      <select id="tab"></select>
+    </div>
+    <div class="btns">
+      <button id="connect">接続</button>
+      <button id="disconnect">切断</button>
+    </div>
+    <div id="status">未接続</div>
+    <script src="popup.js"></script>
+  </body>
+</html>
