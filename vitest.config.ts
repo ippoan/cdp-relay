@@ -2,8 +2,13 @@ import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 
 /**
  * vitest を workerd 上 (@cloudflare/vitest-pool-workers) で動かす。
- * wrangler.toml をそのまま読ませて DO binding / migration / vars を共有し、
- * テスト用に RELAY_TOKEN を固定 + タイムアウトを短縮 + shot 配信オリジンを固定する。
+ *
+ * wrangler.toml は **読み込まない** (`wrangler.configPath` を使わない): wrangler.toml の
+ * `secrets_store_secrets` (RELAY_TOKEN) を load すると miniflare が Secrets Store を
+ * 解決しようとして "Secret not found" になるため。代わりに DO / vars / secret を
+ * miniflare options に直書きし、RELAY_TOKEN は **plain string binding** として inject
+ * する (本番は CF Secrets Store binding、テストは string — HealthConnectReaderWorker と
+ * 同方式。src/lib/auth.ts の resolveRelayToken が両形を解決する)。
  */
 export default defineWorkersConfig({
   test: {
@@ -25,12 +30,18 @@ export default defineWorkersConfig({
         // stack-frame pop に失敗する既知問題があるため無効化する。各テストは
         // ユニークな session (idFromName) を採番するのでテスト間で干渉しない。
         isolatedStorage: false,
-        wrangler: { configPath: "./wrangler.toml" },
+        // worker entry (wrangler.toml は読まない、上の doc 参照)。
+        main: "./src/index.ts",
         miniflare: {
           compatibilityDate: "2025-05-01",
           compatibilityFlags: ["nodejs_compat"],
+          // BrowserSessionDO は ctx.storage.sql を使うので SQLite-backed で起こす。
+          durableObjects: {
+            BROWSER_DO: { className: "BrowserSessionDO", useSQLite: true },
+          },
           bindings: {
-            // テスト用 token (test 側の TOKEN 定数と一致させる)。
+            // テスト用 token (test 側の TOKEN 定数と一致させる)。本番は CF Secrets
+            // Store binding だが、テストでは plain string を inject する。
             RELAY_TOKEN: "test-token",
             // timeout テストを高速化 (本番 default は 30s)。
             CMD_TIMEOUT_MS: "300",

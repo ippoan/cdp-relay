@@ -4,12 +4,19 @@
  * 設定値は wrangler.toml の [vars] で渡し、ここで数値化する (ハードコードしない)。
  * RELAY_TOKEN は secret (拡張 WS と MCP の唯一の関門)。
  */
+/** CF Secrets Store binding (`secrets_store_secrets`)。`.get()` で値を取る。 */
+export type SecretsStoreBinding = { get(): Promise<string> };
+
 export interface Env {
   BROWSER_DO: DurableObjectNamespace;
 
   // ─── secret ───
-  /** 拡張 (/ext) と MCP (/mcp) の shared secret。未設定なら全 reject (fail-closed)。 */
-  RELAY_TOKEN?: string;
+  /**
+   * 拡張 (/ext) と MCP (/mcp) の shared secret。未設定なら全 reject (fail-closed)。
+   * 本番は CF Secrets Store binding (`.get()` で値取得)、テストは plain string を
+   * inject するので union にする (HealthConnectReaderWorker と同パターン)。
+   */
+  RELAY_TOKEN?: SecretsStoreBinding | string;
 
   // ─── 設定値 (文字列 vars。未設定なら下の default) ───
   /** /cmd 1 往復のタイムアウト (ms)。 */
