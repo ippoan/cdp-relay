@@ -1,0 +1,26 @@
+name: Rust Dev Tag
+
+# rust/ が main に入ったら dev タグ (`cdp-agent-dev-N`) を自動採番する。
+# tag push が release-rust.yml を連鎖発火させ、binary を dev prerelease として配布する。
+#
+# - prefix `cdp-agent-dev-` で worker の `v*` タグ空間と完全分離する。
+# - 連鎖発火には PAT が必要 (GITHUB_TOKEN で打つ tag は他 workflow を起こさない)。
+#   TAG_RELEASE_PAT が未設定だと tag は打たれるが release-rust.yml が起動しない。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-dev-tag.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  dev-tag:
+    uses: ippoan/ci-workflows/.github/workflows/dev-tag-release.yml@main
+    with:
+      prefix: cdp-agent-dev-
+    secrets:
+      TAG_RELEASE_PAT: ${{ secrets.TAG_RELEASE_PAT }}

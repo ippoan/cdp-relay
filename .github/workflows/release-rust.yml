@@ -1,0 +1,30 @@
+name: Release Rust agent
+
+# cdp-agent を GitHub Release に配布する。rust-dev-tag.yml が打つ `cdp-agent-dev-N`
+# (dev prerelease)、および手動 `cdp-agent-v*` (stable) を受ける。
+#
+# - working_directory: rust で subdir workspace をビルド (ci-workflows#110)。
+# - tag_strip_prefix で asset 名の prefix doubling を防ぐ
+#   (`cdp-agent-dev-1` → strip `cdp-agent-` → `cdp-agent-dev-1-<target>`)。
+# - `-` を含む tag (dev-*) は reusable 側で自動 prerelease。
+# - worker の `v*` タグとは prefix で分離済み (ci.yml は `v*` のみ deploy)。
+
+on:
+  push:
+    tags:
+      - 'cdp-agent-v*'
+      - 'cdp-agent-dev-*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: ippoan/ci-workflows/.github/workflows/rust-binary-release.yml@main
+    with:
+      working_directory: rust
+      bin_name: cdp-agent
+      package: cdp-agent
+      tag_strip_prefix: cdp-agent-
+    permissions:
+      contents: write

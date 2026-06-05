@@ -1,0 +1,11 @@
+[package]
+name = "cdp-agent"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "手元マシンで cf quick tunnel を張り、tunnel 先に最小 echo server を出す PoC agent (cdp-relay#12 M1)"
+
+# M1 (土台実証) は依存ゼロ。echo server は std::net、cloudflared は std::process で spawn し、
+# quick URL は出力を手動 parse する。crates.io 非依存なので CCoW でも確実にビルドできる。
+[dependencies]
