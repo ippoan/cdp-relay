@@ -47,6 +47,11 @@ secret_name = "INTERNAL_SHARED_SECRET"
 [vars]
 # /mcp で受理する MCP-JWT の aud。"*" で aud 不問 (connector が可変 aud を mint)。
 MCP_JWT_AUDIENCE = "*"
+# 401 の WWW-Authenticate が指す auth-worker (RFC 9728)。claude.ai connector が
+# ここから AS を auto-discover して OAuth/DCR する。auth-worker は staging 運用
+# (auth.ippoan.org は v* tag のみ)、allowlist 追加が即時反映されるのも staging なので
+# auth-staging を指す (ref-files / security-inventory(staging) と同じ)。
+AUTH_WORKER_ORIGIN = "https://auth-staging.ippoan.org"
 # /cmd 1 往復のタイムアウト (ms)。拡張が応答しなければ 504 cdp_timeout。
 CMD_TIMEOUT_MS = "30000"
 # screenshot 一時保存の TTL (秒)。GET 時に超過なら 410、PUT 時に古い分を掃除。

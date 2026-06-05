@@ -27,6 +27,12 @@ export interface Env {
   // ─── 設定値 (文字列 vars。未設定なら下の default) ───
   /** /mcp で受理する MCP-JWT の aud。"*" で aud 不問 (connector が可変 aud を mint)。 */
   MCP_JWT_AUDIENCE?: string;
+  /**
+   * 401 の WWW-Authenticate が指す auth-worker origin (RFC 9728 resource_metadata)。
+   * claude.ai connector がここから AS を auto-discover して OAuth/DCR する。ippoan
+   * auth-worker は staging 運用なので既定 auth-staging。
+   */
+  AUTH_WORKER_ORIGIN?: string;
   /** /cmd 1 往復のタイムアウト (ms)。 */
   CMD_TIMEOUT_MS?: string;
   /** screenshot 一時保存の TTL (秒)。 */
