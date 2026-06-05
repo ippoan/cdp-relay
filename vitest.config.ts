@@ -43,6 +43,9 @@ export default defineWorkersConfig({
             // テスト用 token (test 側の TOKEN 定数と一致させる)。本番は CF Secrets
             // Store binding だが、テストでは plain string を inject する。
             RELAY_TOKEN: "test-token",
+            // /mcp の MCP-JWT 検証鍵 (test 側で同値で JWT を mint する)。
+            MCP_JWT_SECRET: "test-mcp-jwt-secret",
+            MCP_JWT_AUDIENCE: "*",
             // timeout テストを高速化 (本番 default は 30s)。
             CMD_TIMEOUT_MS: "300",
             SHOT_TTL_SECONDS: "300",
