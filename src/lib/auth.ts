@@ -40,9 +40,16 @@ export type TokenCheck = "ok" | "not_configured" | "missing_token" | "bad_token"
  * 照合する。query を優先する (ブラウザの WebSocket API は custom header を付けら
  * れないため拡張は ?token= を使う。MCP クライアントは header を使える)。
  */
+/** RELAY_TOKEN を CF Secrets Store binding (.get()) か plain string (test) から解決する。 */
+async function resolveRelayToken(env: Env): Promise<string> {
+  const t = env.RELAY_TOKEN;
+  if (t === undefined || t === null) return "";
+  return typeof t === "string" ? t : ((await t.get()) ?? "");
+}
+
 export async function checkToken(req: Request, env: Env): Promise<TokenCheck> {
-  const configured = env.RELAY_TOKEN;
-  if (!configured || configured === "") return "not_configured";
+  const configured = await resolveRelayToken(env);
+  if (configured === "") return "not_configured";
 
   const url = new URL(req.url);
   const fromQuery = url.searchParams.get("token") ?? "";
