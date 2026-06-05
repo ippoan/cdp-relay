@@ -1,0 +1,22 @@
+name: Rust CI
+
+# rust/ 配下の cargo workspace (cdp-agent / cdp-prober) の PR CI。
+# worker 側 CI (ci.yml, frontend-ci) とは paths で分離する。
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ippoan/ci-workflows/.github/workflows/rust-ci.yml@main
+    with:
+      working_directory: rust
+      binary_name: cdp-agent
+      shared_key: cdp-relay-rust
