@@ -19,7 +19,7 @@
 import { createWorkerMcp } from "@ippoan/mcp-cf-workers";
 import { z } from "zod";
 import type { Env } from "../env";
-import { browserNavigate, browserScreenshot, CdpToolError } from "./tools";
+import { browserNavigate, browserPair, browserScreenshot, CdpToolError } from "./tools";
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
@@ -37,6 +37,34 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
     name: "cdp-relay",
     version: "0.1.0",
     registerTools: (server) => {
+      server.registerTool(
+        "browser_pair",
+        {
+          description:
+            "手元 Chrome の MV3 拡張をこの session にペアリングするための短命 pairing code を発行する。" +
+            "返り値の { relay_url, session, pair_code } を拡張 popup の Relay URL / Session / Token に貼って" +
+            "「接続」すると、その session の DO に拡張 WS が合流し、以降 browser_navigate / browser_screenshot が使える。" +
+            "pair_code は短命 (既定 15 分) で session 単位。静的 RELAY_TOKEN を人手で調べる代わりに使う。",
+          inputSchema: {
+            session: z
+              .string()
+              .optional()
+              .describe("ペアリング先 session 名。省略時はランダム採番 (pair-xxxxxxxx)"),
+            ttl_seconds: z
+              .number()
+              .optional()
+              .describe("pair_code の有効秒数 (既定 900、最大 86400)"),
+          },
+        },
+        async ({ session, ttl_seconds }: { session?: string; ttl_seconds?: number }) => {
+          try {
+            return ok(await browserPair(env, session, ttl_seconds));
+          } catch (e) {
+            return fail(e);
+          }
+        },
+      );
+
       server.registerTool(
         "browser_navigate",
         {

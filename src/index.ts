@@ -42,21 +42,21 @@ export default {
       if (req.headers.get("Upgrade") !== "websocket") {
         return text("expected websocket upgrade", 426);
       }
-      const gate = await requireToken(req, env);
-      if (gate) return gate;
-      return routeToDo(env, ext[1], req);
+      const auth = await edgeAuth(req, env);
+      if (auth instanceof Response) return auth;
+      return routeToDo(env, ext[1], req, auth);
     }
 
-    // /shot/{session}            PUT (token) — 拡張が screenshot 投入
+    // /shot/{session}            PUT (token/pair) — 拡張が screenshot 投入
     // /shot/{session}/{id}       GET (no token) — Claude が curl で取得
     const shot = path.match(/^\/shot\/([^/]+)(?:\/([^/]+))?\/?$/);
     if (shot) {
       const session = shot[1];
       const shotId = shot[2];
       if (req.method === "PUT" && !shotId) {
-        const gate = await requireToken(req, env);
-        if (gate) return gate;
-        return routeToDo(env, session, req);
+        const auth = await edgeAuth(req, env);
+        if (auth instanceof Response) return auth;
+        return routeToDo(env, session, req, auth);
       }
       if (req.method === "GET" && shotId) {
         // 予測不能 id を知る者だけが取れる (ui-preview の無認証配信と同じ思想)。
@@ -69,19 +69,40 @@ export default {
   },
 };
 
-/** session を idFromName で DO に引き、request をそのまま委譲する。 */
-function routeToDo(env: Env, session: string, req: Request): Promise<Response> {
+/**
+ * session を idFromName で DO に引き、request を委譲する。
+ *
+ * authKind を渡すと内部ヘッダ `X-Relay-Auth` を **edge が付け直して** DO に渡す
+ * (client が詐称した値は上書きされる)。DO はこの header で relay-token (検証済み) と
+ * pair (要 pairing code 検証) を区別する。authKind 省略 (shot GET) はそのまま委譲。
+ */
+function routeToDo(env: Env, session: string, req: Request, authKind?: RelayAuthKind): Promise<Response> {
   const id = env.BROWSER_DO.idFromName(session);
-  return env.BROWSER_DO.get(id).fetch(req);
+  let forwarded = req;
+  if (authKind) {
+    const headers = new Headers(req.headers);
+    headers.set("X-Relay-Auth", authKind);
+    forwarded = new Request(req, { headers });
+  }
+  return env.BROWSER_DO.get(id).fetch(forwarded);
 }
 
-/** RELAY_TOKEN gate (/ext + /shot PUT)。ok なら null、NG なら Response を返す。 */
-async function requireToken(req: Request, env: Env): Promise<Response | null> {
+type RelayAuthKind = "relay-token" | "pair";
+
+/**
+ * /ext + /shot PUT の edge 認証。
+ *   - RELAY_TOKEN 一致           → "relay-token" (DO は素通り)
+ *   - 不一致 (= pairing code 候補) → "pair"        (DO が pairing code として検証)
+ *   - token 提示なし              → 401
+ *   - RELAY_TOKEN 未設定          → 503 (fail-closed)
+ * pairing code は session 単位で DO の SQLite に在るため、検証は DO に委ねる。
+ */
+async function edgeAuth(req: Request, env: Env): Promise<RelayAuthKind | Response> {
   const r: TokenCheck = await checkToken(req, env);
-  if (r === "ok") return null;
+  if (r === "ok") return "relay-token";
+  if (r === "bad_token") return "pair";
   if (r === "not_configured") return json({ error: "relay_token_not_configured" }, 503);
-  if (r === "missing_token") return json({ error: "missing_token" }, 401);
-  return json({ error: "unauthorized" }, 401);
+  return json({ error: "missing_token" }, 401);
 }
 
 // claude.ai connector が OAuth auto-discovery する resource slug (= cdp-relay.ippoan.org
