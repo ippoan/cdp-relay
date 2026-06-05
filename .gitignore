@@ -10,8 +10,8 @@ worker-configuration.d.ts
 # Vitest coverage reports
 coverage/
 
-# ローカル開発では @ippoan/mcp-cf-workers を file:../mcp-cf-workers で link して
-# typecheck / test する (CCoW は GitHub Packages の read token を持たない)。その
-# file link を含む package-lock.json は CI を壊すので commit しない。CI は
-# frontend-ci.yml が npm_scope:'@ippoan' で都度 npm install して dev tag を引く。
-package-lock.json
+# package-lock.json は commit する: frontend-ci.yml の setup-node が
+# `cache: 'npm'` を要求するため lockfile 必須 (lib-ci.yml と違い auto-fallback
+# 無し)。ローカルで @ippoan/mcp-cf-workers を file: link した時に生成される
+# file link 入り lockfile を誤って上書き commit しないよう注意 (registry 参照の
+# lockfile を維持する)。
