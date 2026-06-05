@@ -56,6 +56,9 @@ AUTH_WORKER_ORIGIN = "https://auth-staging.ippoan.org"
 CMD_TIMEOUT_MS = "30000"
 # screenshot 一時保存の TTL (秒)。GET 時に超過なら 410、PUT 時に古い分を掃除。
 SHOT_TTL_SECONDS = "300"
+# pair flow で発行する pairing code の既定 TTL (秒)。browser_pair tool が DO に
+# mint させる短命 token の寿命 (popup に貼って接続 + 接続後の /shot 再利用に耐える長さ)。
+PAIR_TTL_SECONDS = "900"
 # shot_url を組み立てる公開オリジン。空ならリクエスト元 (拡張が叩いた host)。
 RELAY_ORIGIN = ""
 

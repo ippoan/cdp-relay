@@ -37,6 +37,12 @@ export interface Env {
   CMD_TIMEOUT_MS?: string;
   /** screenshot 一時保存の TTL (秒)。 */
   SHOT_TTL_SECONDS?: string;
+  /**
+   * pair flow で発行する pairing code の既定 TTL (秒)。browser_pair tool が DO に
+   * mint させる短命 token の寿命。拡張 popup に貼って接続するまでの猶予 + 接続後の
+   * /shot PUT 再利用に耐える長さにする (静的 RELAY_TOKEN と違い session 単位 + 短命)。
+   */
+  PAIR_TTL_SECONDS?: string;
   /** shot_url を組み立てる公開オリジン。空ならリクエスト元。 */
   RELAY_ORIGIN?: string;
 }
@@ -46,11 +52,14 @@ export interface Settings {
   cmdTimeoutMs: number;
   /** screenshot 一時保存の TTL (秒)。 */
   shotTtlSeconds: number;
+  /** pair flow の pairing code 既定 TTL (秒)。 */
+  pairTtlSeconds: number;
 }
 
 const DEFAULTS: Settings = {
   cmdTimeoutMs: 30_000,
   shotTtlSeconds: 300,
+  pairTtlSeconds: 900,
 };
 
 function num(raw: string | undefined, fallback: number): number {
@@ -63,5 +72,6 @@ export function settings(env: Env): Settings {
   return {
     cmdTimeoutMs: num(env.CMD_TIMEOUT_MS, DEFAULTS.cmdTimeoutMs),
     shotTtlSeconds: num(env.SHOT_TTL_SECONDS, DEFAULTS.shotTtlSeconds),
+    pairTtlSeconds: num(env.PAIR_TTL_SECONDS, DEFAULTS.pairTtlSeconds),
   };
 }

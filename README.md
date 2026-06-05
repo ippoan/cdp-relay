@@ -68,6 +68,9 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
 `POST /mcp` で stateless Streamable HTTP を提供する。`@ippoan/mcp-cf-workers` の
 `createWorkerMcp` を使用 (`src/mcp/server.ts`)。実ロジックは `src/mcp/tools.ts`。
 
+- `browser_pair(session?, ttl_seconds?)` — 手元拡張を session にペアリングする**短命 pairing
+  code** を発行 (`{ session, pair_code, expires_in_seconds, relay_url }`)。静的 `RELAY_TOKEN`
+  を人手で調べる代わりに、Claude が code を発行して手元に渡す (下記 *pair flow* 参照)
 - `browser_navigate(session, url)` — 手元 Chrome を url に遷移 (http(s) のみ)。`{ url }` を返す
 - `browser_screenshot(session)` — viewport を撮って `{ shot_url }` を返す
 
@@ -82,9 +85,28 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
 | endpoint | クライアント | 認証 |
 |---|---|---|
 | `/mcp` | Claude Code | **MCP-JWT** (HS256、`MCP_JWT_SECRET` で検証、ref-files-worker と同方式)。auth-worker が OAT から mint し、`session-start-write-mcp-user-scope.sh` hook が自動 attach |
-| `/ext` | ブラウザ MV3 拡張 | `RELAY_TOKEN` shared secret (`?token=`)。拡張は MCP-JWT を mint できないため |
-| `/shot/{session}` PUT | 拡張 | `RELAY_TOKEN` |
+| `/ext` | ブラウザ MV3 拡張 | `RELAY_TOKEN` **または** session の pairing code (`?token=`)。拡張は MCP-JWT を mint できないため |
+| `/shot/{session}` PUT | 拡張 | `RELAY_TOKEN` または pairing code |
 | `/shot/{session}/{id}` GET | curl | 無認証 (予測不能 id) |
+
+### pair flow (静的 token を手で調べない)
+
+`RELAY_TOKEN` は無期限の共有秘密で、popup に貼るには値を調べる必要があり UX も粒度も粗い。
+代わりに **`browser_pair` tool が session 単位・短命 (既定 15 分) の pairing code を発行**し、
+Claude が会話で手元に渡す。拡張はその code を `?token=` に使って `/ext` `/shot` に接続する:
+
+1. Claude が `browser_pair()` を呼ぶ → DO が pairing code を mint し SQLite に保存 (TTL 付き)
+2. tool が `{ session, pair_code, relay_url }` を返す → Claude が「これを popup に貼って」と提示
+3. ユーザーが popup の **Relay URL / Session / Token** にそれぞれ貼って接続
+4. edge は `?token=` が `RELAY_TOKEN` と不一致なら `X-Relay-Auth: pair` を付けて DO に委譲し、
+   DO が pairing code として権威的に検証 (未失効・session 一致なら通す)
+
+- pairing code は **256-bit ランダム** なので会話に出ても TTL + session スコープで自然失効する
+  (無期限の `RELAY_TOKEN` を会話に出すのとは安全性が桁違い)。`RELAY_TOKEN` は admin fallback
+  として引き続き有効
+- code は **session 単位で 1 つ**。`browser_pair` を再発行すると旧 code は失効する
+- pairing code の検証は edge ではなく **DO** で行う (code が session DO の SQLite に在るため)。
+  edge は `RELAY_TOKEN` 一致/未提示だけを早期に捌き、それ以外を pairing candidate として DO に渡す
 
 **CDP は無認証なのでこれらが唯一の関門**。漏れたら任意 JS eval = ブラウザ乗っ取り。
 未設定なら **fail-closed** (`/mcp` は 500、`/ext` は 503)。比較・検証は constant-time
@@ -107,10 +129,14 @@ openssl rand -hex 32 | bash ~/.claude/skills/secret-inject/scripts/inject-secret
 2. 「パッケージ化されていない拡張機能を読み込む」→ `extension/` ディレクトリを選択
 3. ツールバーの cdp-relay アイコン → popup で設定:
    - **Relay URL**: `https://cdp-relay.ippoan.org` (custom domain。`cdp-relay.<subdomain>.workers.dev` でも可)
-   - **Session**: 任意の名前 (例 `my-laptop`)。MCP tool に渡す session と一致させる
-   - **Token**: `RELAY_TOKEN` と同値 (pair flow で手元に渡す)
+   - **Session**: MCP tool に渡す session と一致させる (pair flow なら `browser_pair` の戻り値の `session`)
+   - **Token**: `browser_pair` が返した **pairing code** を貼る (= 推奨)。または `RELAY_TOKEN` 同値 (admin fallback)
    - **対象タブ**: 操作させたいタブ
 4. 「接続」→ status が `connected` になれば、CCoW から `browser_navigate(session, …)` で操作可能
+
+> **推奨フロー**: 値を手で調べる代わりに、まず Claude に `browser_pair` を呼ばせて
+> `{ relay_url, session, pair_code }` を受け取り、その 3 値を popup に貼る。pairing code は
+> 短命なので会話に出ても安全 (上記 *pair flow* / auth 節を参照)。
 
 MCP (`/mcp`) は ippoan 標準の **MCP-JWT** 認証なので、ref-files と同じく
 `session-start-write-mcp-user-scope.sh` hook が `~/.claude.json` に自動 attach する
@@ -142,5 +168,6 @@ route を自動生成)。workers.dev も fallback で有効。MCP は `https://c
 - [x] P0/P1/P2 (初回 PR): DO リレー (`/ext` `/cmd` `/shot`) + 最小 MV3 拡張 +
       stateless MCP 2 tool (`browser_navigate` / `browser_screenshot`)
 - [x] P3 (済): /mcp を MCP-JWT に統一 (ref-files) + custom domain `cdp-relay.ippoan.org` 有効化
+- [x] P3 (済): pair flow (`browser_pair` tool + DO 発行の短命 pairing code、Refs #7)
 - [ ] P3 (残): 残りツール (`click` / `type` / `eval` / `html` / `pdf` / `wait` / `tabs`) +
-      pair flow + claude-hooks (`write-mcp-user-scope.sh`) への自動 attach 登録
+      claude-hooks (`write-mcp-user-scope.sh`) への自動 attach 登録
