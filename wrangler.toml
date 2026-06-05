@@ -1,0 +1,60 @@
+name = "cdp-relay"
+main = "src/index.ts"
+# crypto.subtle (HMAC token 比較) / SqlStorage / WebSocketPair はすべて標準
+# Workers API なので nodejs_compat は本来不要だが、MCP SDK が node 互換を期待する
+# 箇所に備えて ui-preview / ref-files-worker と同じ compat date に固定しておく。
+compatibility_date = "2025-05-01"
+compatibility_flags = ["nodejs_compat"]
+# 他 ippoan worker と同じアカウント。
+account_id = "24b45709d060d957340180e995f0d373"
+
+# workers.dev サブドメイン (cdp-relay.<subdomain>.workers.dev) で疎通させる。
+# 初回 PR は custom domain を張らず workers.dev のみで deploy する (下の routes は
+# 後続 PR で有効化)。
+workers_dev = true
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# ─── Secrets ────────────────────────────────────────────────────────────────
+# RELAY_TOKEN: 拡張 WS (/ext) と MCP (/mcp) の唯一の関門。CDP は無認証なので
+# これが漏れると任意 JS eval = ブラウザ乗っ取り。
+#
+# scaffold 段階では未 provision なので required は空にしておく。secret-verify は
+# `[secrets] required` の宣言名が GCP Secret Manager に存在するかを突合するため、
+# 未投入の名前を宣言すると CI が fail する (= 投入してから宣言する規約)。
+# worker を実利用する前に、値を一切露出しない secret-inject skill で投入し、
+# その後この required に "RELAY_TOKEN" を戻す (= secret-verify で投入漏れを検出):
+#   1. GCP(SoT): openssl rand -hex 32 | \
+#        bash ~/.claude/skills/secret-inject/scripts/inject-secret.sh RELAY_TOKEN --targets gcp
+#   2. deploy 後に worker secret 設定 (GCP と同値): npx wrangler secret put RELAY_TOKEN
+#   3. この required に "RELAY_TOKEN" を戻して再 PR
+# worker は RELAY_TOKEN 未設定なら fail-closed (全 503) なので未投入でも安全。
+[secrets]
+required = []
+
+# ─── 設定値 (文字列 vars。未設定なら src/env.ts の default) ───────────────────
+[vars]
+# /cmd 1 往復のタイムアウト (ms)。拡張が応答しなければ 504 cdp_timeout。
+CMD_TIMEOUT_MS = "30000"
+# screenshot 一時保存の TTL (秒)。GET 時に超過なら 410、PUT 時に古い分を掃除。
+SHOT_TTL_SECONDS = "300"
+# shot_url を組み立てる公開オリジン。空ならリクエスト元 (拡張が叩いた host)。
+RELAY_ORIGIN = ""
+
+# ─── Durable Object: 1 session = 1 DO (idFromName(session)) ───────────────────
+# 拡張 WS を hibernatable に hold し、/cmd の CDP コマンドを id 相関で往復させ、
+# screenshot を SQLite に一時保存する。
+[[durable_objects.bindings]]
+name = "BROWSER_DO"
+class_name = "BrowserSessionDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BrowserSessionDO"]
+
+# Custom domain (control 面) は後続 PR で有効化する。初回は workers.dev のみ。
+# [[routes]]
+# pattern = "cdp-relay.ippoan.org"
+# custom_domain = true

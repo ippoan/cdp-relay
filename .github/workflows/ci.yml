@@ -1,0 +1,39 @@
+name: CI
+
+# 他 ippoan worker repo と同じ frontend-ci.yml caller pattern。
+# Single-env 運用: staging = prod。専用 URL は持たず cdp-relay 1 本立てで、
+# PR merge (push: main) も tag push も同じ `wrangler deploy` で同一 worker に出す。
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+# frontend-ci.yml は内蔵 auto-merge / secret-verify を持つため
+# top-level で contents:write + pull-requests:write + id-token:write が必須
+# (ci-workflows/CLAUDE.md "Option A" 参照)。
+permissions:
+  contents: write
+  pull-requests: write
+  packages: read
+  id-token: write
+
+jobs:
+  ci:
+    uses: ippoan/ci-workflows/.github/workflows/frontend-ci.yml@main
+    with:
+      project_type: worker
+      # @ippoan/mcp-cf-workers は GitHub Packages (private read)。setup-node に
+      # @ippoan scope registry + NODE_AUTH_TOKEN=GITHUB_TOKEN を構成させる。
+      npm_scope: '@ippoan'
+      install_command: 'npm install'
+      typecheck_command: 'npx tsc --noEmit'
+      has_tests: true
+      post_install_script: 'npx wrangler types'
+      # Single-env (staging = prod)。staging / release どちらも同じ cdp-relay
+      # worker へ deploy する (別 env や --env staging は持たない)。
+      deploy_staging_script: 'npx wrangler deploy'
+      deploy_release_script: 'npx wrangler deploy'
+    secrets: inherit
