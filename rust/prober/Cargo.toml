@@ -7,6 +7,12 @@ repository.workspace = true
 description = "CCoW から手元 agent の quick tunnel URL に 443 で到達できるか確認する PoC prober (cdp-relay#12 M1)"
 
 # in-process で HTTPS GET する。これは将来 CCoW proxy が tunnel_url に MCP 転送する際の
-# HTTP client の素振りでもある。ureq + rustls で OS TLS / openssl 非依存。
+# HTTP client の素振りでもある。
+#
+# TLS は **native-tls (OS のシステム CA)** を使う。CCoW egress gateway は TLS を MITM
+# 終端しており、その gateway CA は公開 CA ではなくシステム CA store にだけ入っている。
+# webpki-roots (公開 CA のみ) だと UnknownIssuer で弾かれるため、CCoW から HTTPS を
+# 叩く client は native-tls 必須 (#12 M1 で実証)。
 [dependencies]
-ureq = "2"
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
+native-tls = "0.2"
