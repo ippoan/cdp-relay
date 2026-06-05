@@ -106,7 +106,7 @@ openssl rand -hex 32 | bash ~/.claude/skills/secret-inject/scripts/inject-secret
 1. `chrome://extensions` を開き、右上「デベロッパーモード」を ON
 2. 「パッケージ化されていない拡張機能を読み込む」→ `extension/` ディレクトリを選択
 3. ツールバーの cdp-relay アイコン → popup で設定:
-   - **Relay URL**: deploy した worker (例 `https://cdp-relay.<subdomain>.workers.dev`)
+   - **Relay URL**: `https://cdp-relay.ippoan.org` (custom domain。`cdp-relay.<subdomain>.workers.dev` でも可)
    - **Session**: 任意の名前 (例 `my-laptop`)。MCP tool に渡す session と一致させる
    - **Token**: `RELAY_TOKEN` と同値 (pair flow で手元に渡す)
    - **対象タブ**: 操作させたいタブ
@@ -133,12 +133,14 @@ npm run dev         # wrangler dev
 ## デプロイ
 
 Single-env (staging = prod)。PR merge (push: main) も tag push も同じ `wrangler deploy`
-で同一 worker に出す (CI: `ippoan/ci-workflows` の `frontend-ci.yml`)。初回は
-`workers_dev = true` のみ。custom domain (`cdp-relay.ippoan.org`) は後続 PR で有効化する。
+で同一 worker に出す (CI: `ippoan/ci-workflows` の `frontend-ci.yml`)。一次エンドポイントは
+custom domain **`cdp-relay.ippoan.org`** (`wrangler deploy` が ippoan.org ゾーンに DNS +
+route を自動生成)。workers.dev も fallback で有効。MCP は `https://cdp-relay.ippoan.org/mcp`。
 
 ## ロードマップ (issue #28 PoC 段取り)
 
 - [x] P0/P1/P2 (初回 PR): DO リレー (`/ext` `/cmd` `/shot`) + 最小 MV3 拡張 +
       stateless MCP 2 tool (`browser_navigate` / `browser_screenshot`)
-- [ ] P3: 残りツール (`click` / `type` / `eval` / `html` / `pdf` / `wait` / `tabs`)
-- [ ] P3: auth 強化 + pair flow (auth-worker の device/pair に倣う) + custom domain 有効化
+- [x] P3 (済): /mcp を MCP-JWT に統一 (ref-files) + custom domain `cdp-relay.ippoan.org` 有効化
+- [ ] P3 (残): 残りツール (`click` / `type` / `eval` / `html` / `pdf` / `wait` / `tabs`) +
+      pair flow + claude-hooks (`write-mcp-user-scope.sh`) への自動 attach 登録

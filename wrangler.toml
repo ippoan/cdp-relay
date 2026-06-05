@@ -8,9 +8,9 @@ compatibility_flags = ["nodejs_compat"]
 # 他 ippoan worker と同じアカウント。
 account_id = "24b45709d060d957340180e995f0d373"
 
-# workers.dev サブドメイン (cdp-relay.<subdomain>.workers.dev) で疎通させる。
-# 初回 PR は custom domain を張らず workers.dev のみで deploy する (下の routes は
-# 後続 PR で有効化)。
+# workers.dev サブドメイン (cdp-relay.<subdomain>.workers.dev) も有効化しておく
+# (custom domain 反映前の fallback / 疎通確認用)。一次エンドポイントは下の
+# custom domain (cdp-relay.ippoan.org)。
 workers_dev = true
 
 [observability]
@@ -65,7 +65,9 @@ class_name = "BrowserSessionDO"
 tag = "v1"
 new_sqlite_classes = ["BrowserSessionDO"]
 
-# Custom domain (control 面) は後続 PR で有効化する。初回は workers.dev のみ。
-# [[routes]]
-# pattern = "cdp-relay.ippoan.org"
-# custom_domain = true
+# Custom domain (一次エンドポイント)。`wrangler deploy` が ippoan.org ゾーンに
+# DNS record + worker route を自動生成する (ref-files.ippoan.org / ui-preview.ippoan.org
+# と同じ account / パターン)。MCP は https://cdp-relay.ippoan.org/mcp。
+[[routes]]
+pattern = "cdp-relay.ippoan.org"
+custom_domain = true
