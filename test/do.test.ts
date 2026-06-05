@@ -45,9 +45,12 @@ describe("edge routing / auth gate", () => {
     res.webSocket?.close();
   });
 
-  it("/mcp は token 無しで 401", async () => {
+  it("/mcp は token 無しで 401 + RFC 9728 challenge (auth-staging/cdp-relay を指す)", async () => {
     const res = await SELF.fetch(`${BASE}/mcp`, { method: "POST" });
     expect(res.status).toBe(401);
+    const wa = res.headers.get("WWW-Authenticate") ?? "";
+    expect(wa).toContain("resource_metadata=");
+    expect(wa).toContain("auth-staging.ippoan.org/.well-known/oauth-protected-resource/cdp-relay");
   });
 });
 

@@ -84,16 +84,31 @@ async function requireToken(req: Request, env: Env): Promise<Response | null> {
   return json({ error: "unauthorized" }, 401);
 }
 
-/** MCP-JWT gate (/mcp)。ok なら null、NG なら Response (401 は WWW-Authenticate 付き)。 */
+// claude.ai connector が OAuth auto-discovery する resource slug (= cdp-relay.ippoan.org
+// の hostname 先頭 label)。auth-worker の MCP_RESOURCE_ORIGINS_ALLOWLIST と一致させる。
+const RESOURCE_METADATA_SLUG = "cdp-relay";
+
+/** RFC 6750 + RFC 9728 challenge。connector は resource_metadata を辿って AS を発見する。 */
+function wwwAuthenticate(env: Env, error?: string): string {
+  const authOrigin =
+    env.AUTH_WORKER_ORIGIN && env.AUTH_WORKER_ORIGIN !== ""
+      ? env.AUTH_WORKER_ORIGIN
+      : "https://auth-staging.ippoan.org";
+  const base = `Bearer realm="MCP", resource_metadata="${authOrigin}/.well-known/oauth-protected-resource/${RESOURCE_METADATA_SLUG}"`;
+  return error ? `${base}, error="${error}"` : base;
+}
+
+/** MCP-JWT gate (/mcp)。ok なら null、NG なら Response (401 は RFC 9728 challenge 付き)。 */
 async function requireMcpJwt(req: Request, env: Env): Promise<Response | null> {
   const r: McpJwtCheck = await checkMcpJwt(req, env);
   if (r === "ok") return null;
   if (r === "not_configured") return json({ error: "mcp_jwt_secret_not_configured" }, 500);
+  const error = r === "missing_bearer" ? "invalid_request" : "invalid_token";
   return new Response(JSON.stringify({ error: "unauthorized", reason: r }), {
     status: 401,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      "WWW-Authenticate": 'Bearer realm="MCP"',
+      "WWW-Authenticate": wwwAuthenticate(env, error),
     },
   });
 }
