@@ -2,7 +2,8 @@
  * Worker / DO の binding と設定値。
  *
  * 設定値は wrangler.toml の [vars] で渡し、ここで数値化する (ハードコードしない)。
- * RELAY_TOKEN は secret (拡張 WS と MCP の唯一の関門)。
+ * secret は RELAY_TOKEN (拡張 WS /ext + /shot PUT) と MCP_JWT_SECRET (/mcp の
+ * MCP-JWT 検証) の 2 系統。
  */
 /** CF Secrets Store binding (`secrets_store_secrets`)。`.get()` で値を取る。 */
 export type SecretsStoreBinding = { get(): Promise<string> };
@@ -10,15 +11,22 @@ export type SecretsStoreBinding = { get(): Promise<string> };
 export interface Env {
   BROWSER_DO: DurableObjectNamespace;
 
-  // ─── secret ───
+  // ─── secrets (CF Secrets Store binding。本番は .get()、テストは plain string inject) ───
   /**
-   * 拡張 (/ext) と MCP (/mcp) の shared secret。未設定なら全 reject (fail-closed)。
-   * 本番は CF Secrets Store binding (`.get()` で値取得)、テストは plain string を
-   * inject するので union にする (HealthConnectReaderWorker と同パターン)。
+   * 拡張 WS (/ext) + screenshot 投入 (/shot PUT) の shared secret。ブラウザ拡張は
+   * MCP-JWT を mint できないので shared secret で受ける。未設定なら fail-closed。
    */
   RELAY_TOKEN?: SecretsStoreBinding | string;
+  /**
+   * /mcp (Claude Code) の MCP-JWT 検証鍵。auth-worker が MCP-JWT を署名する
+   * INTERNAL_SHARED_SECRET と同値を bind する (ref-files-worker と同方式)。これで
+   * /mcp は ippoan 標準の MCP-JWT 認証になり hook の自動 attach に乗る。
+   */
+  MCP_JWT_SECRET?: SecretsStoreBinding | string;
 
   // ─── 設定値 (文字列 vars。未設定なら下の default) ───
+  /** /mcp で受理する MCP-JWT の aud。"*" で aud 不問 (connector が可変 aud を mint)。 */
+  MCP_JWT_AUDIENCE?: string;
   /** /cmd 1 往復のタイムアウト (ms)。 */
   CMD_TIMEOUT_MS?: string;
   /** screenshot 一時保存の TTL (秒)。 */

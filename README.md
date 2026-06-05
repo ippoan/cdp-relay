@@ -40,7 +40,7 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
 
 | メソッド / パス | 役割 |
 |---|---|
-| `POST /mcp` | MCP ツール (`browser_navigate` / `browser_screenshot`)。**token 必須** |
+| `POST /mcp` | MCP ツール (`browser_navigate` / `browser_screenshot`)。**MCP-JWT 認証** (ref-files と同方式) |
 | `GET /ext/{session}` | 拡張の WS upgrade。`?token=` 必須 (hibernatable hold) |
 | `PUT /shot/{session}` | 拡張が screenshot(PNG) を投入。token 必須。`{ shot_url }` を返す |
 | `GET /shot/{session}/{id}` | screenshot 一時配信 (予測不能 id ゆえ token 不要、TTL 既定 5 分) |
@@ -77,17 +77,28 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
 
 ## auth / security
 
-- `/ext` (拡張接続) と `/mcp` の両方に `RELAY_TOKEN`。**CDP は無認証 = この token が
-  唯一の関門**。漏れたら任意 JS eval = ブラウザ乗っ取り。
-- `RELAY_TOKEN` 未設定なら全 reject (**fail-closed**、503 `relay_token_not_configured`)。
-- 比較は constant-time (`src/lib/auth.ts` の HMAC 固定長化 + XOR)。
-- token は会話 context・log・tool param に出さない。`secret-inject` skill で投入する:
+エンドポイントごとに認証方式が違う (クライアントが違うため):
+
+| endpoint | クライアント | 認証 |
+|---|---|---|
+| `/mcp` | Claude Code | **MCP-JWT** (HS256、`MCP_JWT_SECRET` で検証、ref-files-worker と同方式)。auth-worker が OAT から mint し、`session-start-write-mcp-user-scope.sh` hook が自動 attach |
+| `/ext` | ブラウザ MV3 拡張 | `RELAY_TOKEN` shared secret (`?token=`)。拡張は MCP-JWT を mint できないため |
+| `/shot/{session}` PUT | 拡張 | `RELAY_TOKEN` |
+| `/shot/{session}/{id}` GET | curl | 無認証 (予測不能 id) |
+
+**CDP は無認証なのでこれらが唯一の関門**。漏れたら任意 JS eval = ブラウザ乗っ取り。
+未設定なら **fail-closed** (`/mcp` は 500、`/ext` は 503)。比較・検証は constant-time
+(`src/lib/auth.ts` / `src/lib/jwt.ts`)。
+
+- **`MCP_JWT_SECRET`** は auth-worker の `INTERNAL_SHARED_SECRET` と同値を Secrets Store
+  binding で受ける (既存 secret 再利用、新規投入不要)。`aud` は `MCP_JWT_AUDIENCE="*"` で
+  不問 (connector が可変 aud を mint するため)。
+- **`RELAY_TOKEN`** は `secret-inject` skill で CF Secrets Store + GCP(SoT) に投入する
+  (値は context/log 非露出):
 
 ```sh
 openssl rand -hex 32 | bash ~/.claude/skills/secret-inject/scripts/inject-secret.sh \
-  CDP_RELAY_TOKEN --targets cf
-# 投入後、worker binding に設定:
-npx wrangler secret put RELAY_TOKEN
+  RELAY_TOKEN --targets gcp,cf
 ```
 
 ## 拡張のロード (手元 Chrome、1 度だけ)
@@ -101,8 +112,10 @@ npx wrangler secret put RELAY_TOKEN
    - **対象タブ**: 操作させたいタブ
 4. 「接続」→ status が `connected` になれば、CCoW から `browser_navigate(session, …)` で操作可能
 
-MCP は `mcp-user-setup` skill で `~/.claude.json` の user-scope に登録する
-(`<relayUrl>/mcp`、`Authorization: Bearer <RELAY_TOKEN>`)。
+MCP (`/mcp`) は ippoan 標準の **MCP-JWT** 認証なので、ref-files と同じく
+`session-start-write-mcp-user-scope.sh` hook が `~/.claude.json` に自動 attach する
+(token cache の MCP-JWT を `Authorization: Bearer` で渡す)。手動登録は `mcp-user-setup`
+skill 参照。拡張 popup の **Token** は `/ext` 用の `RELAY_TOKEN` で、MCP-JWT とは別物。
 
 ## 開発
 

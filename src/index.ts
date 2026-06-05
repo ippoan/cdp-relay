@@ -4,7 +4,7 @@
  * 役割は薄い: token を検証し、request を session (= idFromName) で BrowserSessionDO に
  * 振り分けるだけ。CDP の往復 / screenshot 保存はすべて DO 側にある。
  *
- *   POST /mcp                  … MCP ツール (browser_navigate / browser_screenshot)。token 必須
+ *   POST /mcp                  … MCP ツール。MCP-JWT 認証 (ref-files と同方式、RELAY_TOKEN ではない)
  *   GET  /ext/{session}        … 拡張の WS upgrade。token (?token=) 必須
  *   PUT  /shot/{session}       … 拡張が screenshot を投入。token 必須
  *   GET  /shot/{session}/{id}  … screenshot 一時配信 (予測不能 id ゆえ token 不要)
@@ -14,7 +14,7 @@
  * /cmd は edge では公開しない (MCP tool だけが DO stub 経由で内部的に叩く)。
  */
 import { Env } from "./env";
-import { checkToken, TokenCheck } from "./lib/auth";
+import { checkToken, TokenCheck, checkMcpJwt, McpJwtCheck } from "./lib/auth";
 
 export { BrowserSessionDO } from "./do/browser-session-do";
 
@@ -27,7 +27,8 @@ export default {
     if (path === "/health") return json({ ok: true });
 
     if (path === "/mcp") {
-      const gate = await requireToken(req, env);
+      // /mcp は ippoan 標準の MCP-JWT 認証 (ref-files と同方式)。RELAY_TOKEN ではない。
+      const gate = await requireMcpJwt(req, env);
       if (gate) return gate;
       // MCP SDK (+ ajv) は重く workers-pool テスト loader とも相性が悪いので、
       // /mcp が叩かれた時だけ遅延ロードする。
@@ -74,13 +75,27 @@ function routeToDo(env: Env, session: string, req: Request): Promise<Response> {
   return env.BROWSER_DO.get(id).fetch(req);
 }
 
-/** token gate。ok なら null、NG なら Response を返す。 */
+/** RELAY_TOKEN gate (/ext + /shot PUT)。ok なら null、NG なら Response を返す。 */
 async function requireToken(req: Request, env: Env): Promise<Response | null> {
   const r: TokenCheck = await checkToken(req, env);
   if (r === "ok") return null;
   if (r === "not_configured") return json({ error: "relay_token_not_configured" }, 503);
   if (r === "missing_token") return json({ error: "missing_token" }, 401);
   return json({ error: "unauthorized" }, 401);
+}
+
+/** MCP-JWT gate (/mcp)。ok なら null、NG なら Response (401 は WWW-Authenticate 付き)。 */
+async function requireMcpJwt(req: Request, env: Env): Promise<Response | null> {
+  const r: McpJwtCheck = await checkMcpJwt(req, env);
+  if (r === "ok") return null;
+  if (r === "not_configured") return json({ error: "mcp_jwt_secret_not_configured" }, 500);
+  return new Response(JSON.stringify({ error: "unauthorized", reason: r }), {
+    status: 401,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "WWW-Authenticate": 'Bearer realm="MCP"',
+    },
+  });
 }
 
 function landingPage(): Response {
@@ -107,7 +122,7 @@ function landingPage(): Response {
        手元 Chrome に MV3 拡張をロードし、session 名 + token を合わせて接続する。</p>
     <table>
       <tr><th>メソッド / パス</th><th>役割</th></tr>
-      <tr><td><code>POST /mcp</code></td><td>MCP (browser_navigate / browser_screenshot)。token 必須</td></tr>
+      <tr><td><code>POST /mcp</code></td><td>MCP (browser_navigate / browser_screenshot)。MCP-JWT 認証</td></tr>
       <tr><td><code>GET /ext/{session}</code></td><td>拡張の WS upgrade。<code>?token=</code> 必須</td></tr>
       <tr><td><code>PUT /shot/{session}</code></td><td>拡張が screenshot を投入。token 必須</td></tr>
       <tr><td><code>GET /shot/{session}/{id}</code></td><td>screenshot 一時配信 (予測不能 id)</td></tr>

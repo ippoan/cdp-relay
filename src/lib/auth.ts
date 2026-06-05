@@ -1,10 +1,11 @@
 /**
- * shared secret (RELAY_TOKEN) の検証。
- *
- * CDP は無認証なので RELAY_TOKEN が唯一の関門 (漏れたら任意 JS eval = ブラウザ
- * 乗っ取り)。比較は constant-time で行い、未設定時は fail-closed (= スキップしない)。
+ * 認証 helper。endpoint ごとに方式が違う:
+ *   - /ext (ブラウザ拡張 WS) + /shot PUT → shared secret RELAY_TOKEN (constant-time)
+ *   - /mcp (Claude Code)             → MCP-JWT (HS256、MCP_JWT_SECRET で検証、ref-files と同方式)
+ * CDP は無認証なのでこれらが唯一の関門。未設定時は fail-closed (= スキップしない)。
  */
-import type { Env } from "../env";
+import type { Env, SecretsStoreBinding } from "../env";
+import { verifyMcpJwt, JwtVerifyError } from "./jwt";
 
 /**
  * 2 文字列を constant-time で比較する。
@@ -40,15 +41,14 @@ export type TokenCheck = "ok" | "not_configured" | "missing_token" | "bad_token"
  * 照合する。query を優先する (ブラウザの WebSocket API は custom header を付けら
  * れないため拡張は ?token= を使う。MCP クライアントは header を使える)。
  */
-/** RELAY_TOKEN を CF Secrets Store binding (.get()) か plain string (test) から解決する。 */
-async function resolveRelayToken(env: Env): Promise<string> {
-  const t = env.RELAY_TOKEN;
-  if (t === undefined || t === null) return "";
-  return typeof t === "string" ? t : ((await t.get()) ?? "");
+/** CF Secrets Store binding (.get()) か plain string (test) から secret 値を解決する。 */
+async function resolveSecret(value: SecretsStoreBinding | string | undefined): Promise<string> {
+  if (value === undefined || value === null) return "";
+  return typeof value === "string" ? value : ((await value.get()) ?? "");
 }
 
 export async function checkToken(req: Request, env: Env): Promise<TokenCheck> {
-  const configured = await resolveRelayToken(env);
+  const configured = await resolveSecret(env.RELAY_TOKEN);
   if (configured === "") return "not_configured";
 
   const url = new URL(req.url);
@@ -59,4 +59,31 @@ export async function checkToken(req: Request, env: Env): Promise<TokenCheck> {
 
   if (!presented) return "missing_token";
   return (await timingSafeEqual(presented, configured)) ? "ok" : "bad_token";
+}
+
+export type McpJwtCheck = "ok" | "not_configured" | "missing_bearer" | "bad_token";
+
+/**
+ * /mcp 用 MCP-JWT 検証。`Authorization: Bearer <jwt>` を MCP_JWT_SECRET
+ * (= auth-worker 署名鍵 INTERNAL_SHARED_SECRET) で HS256 検証する。aud は
+ * MCP_JWT_AUDIENCE (既定 "*" = aud 不問)。ref-files-worker と同方式。
+ */
+export async function checkMcpJwt(req: Request, env: Env): Promise<McpJwtCheck> {
+  const header = req.headers.get("Authorization") ?? "";
+  if (!header.startsWith("Bearer ")) return "missing_bearer";
+  const token = header.slice("Bearer ".length).trim();
+  if (!token) return "missing_bearer";
+
+  const secret = await resolveSecret(env.MCP_JWT_SECRET);
+  if (secret === "") return "not_configured";
+
+  const audience =
+    env.MCP_JWT_AUDIENCE && env.MCP_JWT_AUDIENCE !== "" ? env.MCP_JWT_AUDIENCE : "*";
+  try {
+    await verifyMcpJwt(token, secret, audience);
+    return "ok";
+  } catch (e) {
+    if (e instanceof JwtVerifyError) return "bad_token";
+    throw e;
+  }
 }
