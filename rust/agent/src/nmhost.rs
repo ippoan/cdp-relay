@@ -185,15 +185,22 @@ pub fn native_host_manifest_json(exe_path: &Path) -> String {
     serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| manifest.to_string())
 }
 
-/// native-host manifest を exe の隣に書き、Chrome / Edge の HKCU registry に登録する (Windows)。
-/// admin 不要 (per-user)。通常起動時に idempotent に呼ばれる + `--install-native-host` で明示可。
+/// native-host manifest を user-writable な場所に書き、Chrome / Edge の HKCU registry に
+/// 登録する (Windows)。admin 不要 (per-user)。通常起動時に idempotent に呼ばれる +
+/// `--install-native-host` で明示可。
+///
+/// manifest は **`%LOCALAPPDATA%\cdp-relay-agent\`** に置く。exe が
+/// `C:\Program Files\` (perMachine MSI) に入ると隣には admin 無しで書けないため。
+/// Chrome は manifest を read するだけなので、`path` フィールドが Program Files の exe を
+/// 指していても問題ない。
 #[cfg(windows)]
 pub fn install_native_host() -> Result<String, String> {
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = exe.parent().ok_or_else(|| "exe parent 不明".to_string())?;
+    let dir = manifest_dir(&exe)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     let manifest_path = dir.join(format!("{HOST_NAME}.json"));
     std::fs::write(&manifest_path, native_host_manifest_json(&exe)).map_err(|e| e.to_string())?;
 
@@ -210,6 +217,16 @@ pub fn install_native_host() -> Result<String, String> {
             .map_err(|e| format!("registry set {base}: {e}"))?;
     }
     Ok(format!("native host 登録: {manifest_str}"))
+}
+
+/// manifest を置く user-writable ディレクトリ。`%LOCALAPPDATA%\cdp-relay-agent`、
+/// LOCALAPPDATA が無ければ exe の隣に fallback。
+#[cfg(windows)]
+fn manifest_dir(exe: &Path) -> Result<std::path::PathBuf, String> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(|p| std::path::PathBuf::from(p).join("cdp-relay-agent"))
+        .or_else(|| exe.parent().map(|p| p.to_path_buf()))
+        .ok_or_else(|| "LOCALAPPDATA も exe parent も不明".to_string())
 }
 
 /// 非 Windows fallback。registry 登録は Windows 専用だが、manifest 生成は OS 非依存なので

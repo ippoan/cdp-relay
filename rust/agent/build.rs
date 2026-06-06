@@ -18,4 +18,11 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=CDP_AGENT_RELEASE_TAG");
     println!("cargo:rerun-if-env-changed=GITHUB_REF_NAME");
+
+    // Windows target のみ: asInvoker マニフェストを埋め込み、Windows の installer-detection
+    // による UAC 自動昇格を抑止する (#33)。target でガードするので Linux ビルドには無影響。
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        use embed_manifest::{embed_manifest, new_manifest};
+        embed_manifest(new_manifest("CdpRelayAgent")).expect("unable to embed manifest");
+    }
 }

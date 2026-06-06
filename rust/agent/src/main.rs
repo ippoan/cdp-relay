@@ -202,7 +202,8 @@ fn main() {
     }
 
     let bin = std::env::var("CLOUDFLARED_BIN").unwrap_or_else(|_| "cloudflared".into());
-    let mut child = match Command::new(&bin)
+    let mut cf_cmd = Command::new(&bin);
+    cf_cmd
         .args([
             "tunnel",
             "--url",
@@ -210,9 +211,18 @@ fn main() {
             "--no-autoupdate",
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    // Windows: 拡張から Native Messaging 起動された agent が cloudflared を spawn すると、
+    // console subsystem の cloudflared.exe が自前の console window を出してしまう
+    // (agent 本体は CREATE_NO_WINDOW 済みだが子に伝播しない)。CREATE_NO_WINDOW を付けて
+    // 接続後にコンソールが出ないようにする (#33)。
+    #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cf_cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = match cf_cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!(
