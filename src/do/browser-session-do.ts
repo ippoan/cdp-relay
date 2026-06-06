@@ -68,6 +68,16 @@ export class BrowserSessionDO {
         expires_at INTEGER NOT NULL
       );`,
     );
+    // rendezvous (cdp-relay#12 M3): 手元 agent が張る quick tunnel の URL を
+    // session 単位で hold する単一行。CCoW proxy が lookup して tunnel_url に直結
+    // する (= 「最初だけ DO、あと手元」。DO は data plane を持たない rendezvous)。
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS rendezvous(
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        tunnel_url TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );`,
+    );
   }
 
   async fetch(req: Request): Promise<Response> {
@@ -85,6 +95,13 @@ export class BrowserSessionDO {
     // browser_pair tool → 短命 pairing code を mint (internal、edge では公開しない)。
     if (path.endsWith("/pair") && req.method === "POST") {
       return this.handlePair(req);
+    }
+    // rendezvous (M3): 手元 agent が quick tunnel URL を登録 / CCoW proxy が引く。
+    if (req.method === "POST" && /^\/register\/[^/]+\/?$/.test(path)) {
+      return this.handleRegister(req);
+    }
+    if (req.method === "GET" && /^\/lookup\/[^/]+\/?$/.test(path)) {
+      return this.handleLookup(req);
     }
     // screenshot 投入 (拡張) / 配信 (Claude が curl)。
     if (req.method === "PUT" && /^\/shot\/[^/]+\/?$/.test(path)) {
@@ -154,6 +171,48 @@ export class BrowserSessionDO {
       expiresAt,
     );
     return json({ pair_code: code, expires_in_seconds: ttl, expires_at: expiresAt });
+  }
+
+  // ─── rendezvous: quick tunnel URL の登録 (/register) / 解決 (/lookup) ────────
+
+  /**
+   * 手元 agent が張った quick tunnel URL を session に登録する (single row upsert)。
+   * tunnel_url は capability (漏れたら無認証 CDP に直結できる) なので、/ext と同じく
+   * relay-token / pairing code 認証を要求する。値は https のみ受ける。
+   */
+  private async handleRegister(req: Request): Promise<Response> {
+    if (!this.authorize(req)) return json({ error: "unauthorized" }, 401);
+    let body: { tunnel_url?: unknown };
+    try {
+      body = (await req.json()) as typeof body;
+    } catch {
+      return json({ error: "bad_request" }, 400);
+    }
+    const tunnelUrl = body.tunnel_url;
+    if (typeof tunnelUrl !== "string" || !/^https:\/\/[^\s/]+(\/[^\s]*)?$/.test(tunnelUrl)) {
+      return json({ error: "invalid_tunnel_url" }, 400);
+    }
+    const now = Date.now();
+    this.sql.exec(
+      `INSERT INTO rendezvous(id, tunnel_url, updated_at) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET tunnel_url = excluded.tunnel_url, updated_at = excluded.updated_at`,
+      tunnelUrl,
+      now,
+    );
+    return json({ ok: true, tunnel_url: tunnelUrl, updated_at: now });
+  }
+
+  /** CCoW proxy が session の tunnel_url を引く。未登録は 404。 */
+  private handleLookup(req: Request): Response {
+    if (!this.authorize(req)) return json({ error: "unauthorized" }, 401);
+    const rows = this.sql
+      .exec<{
+        tunnel_url: string;
+        updated_at: number;
+      }>("SELECT tunnel_url, updated_at FROM rendezvous WHERE id = 1")
+      .toArray();
+    if (rows.length === 0) return json({ error: "not_registered" }, 404);
+    return json({ tunnel_url: rows[0].tunnel_url, updated_at: rows[0].updated_at });
   }
 
   // ─── 拡張 WS (hibernatable) ─────────────────────────────────────────────────
