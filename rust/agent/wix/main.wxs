@@ -40,6 +40,10 @@
       <Directory Id='ProgramFiles64Folder' Name='PFiles'>
         <Directory Id='APPLICATIONFOLDER' Name='cdp-relay-agent' />
       </Directory>
+      <!-- スタートメニュー (プログラム一覧) のショートカット用フォルダ -->
+      <Directory Id='ProgramMenuFolder'>
+        <Directory Id='AppShortcutFolder' Name='cdp-relay agent' />
+      </Directory>
     </Directory>
 
     <DirectoryRef Id='APPLICATIONFOLDER'>
@@ -64,6 +68,27 @@
       </Component>
     </DirectoryRef>
 
+    <!-- スタートメニューに cdp-agent のショートカットを作る (Program Files 直叩きを避ける)。
+         文字列は code page 1252 に収めるため ASCII のみ (LGHT0311 回避)。 -->
+    <DirectoryRef Id='AppShortcutFolder'>
+      <Component Id='StartMenuShortcutComp' Guid='6121CB53-6854-4DC4-899A-B8D09621BDE0' Win64='yes'>
+        <Shortcut
+          Id='CdpAgentStartMenu'
+          Name='cdp-relay agent'
+          Description='quick tunnel agent to drive local Chrome via CDP from CCoW'
+          Target='[#CdpAgentExe]'
+          WorkingDirectory='APPLICATIONFOLDER' />
+        <RemoveFolder Id='RemoveAppShortcutFolder' On='uninstall' />
+        <RegistryValue
+          Root='HKCU'
+          Key='Software\ippoan\cdp-agent'
+          Name='installed'
+          Type='integer'
+          Value='1'
+          KeyPath='yes' />
+      </Component>
+    </DirectoryRef>
+
     <Feature
       Id='MainFeature'
       Title='cdp-relay agent'
@@ -75,6 +100,7 @@
       Absent='disallow'>
       <ComponentRef Id='CdpAgentExeComp' />
       <ComponentRef Id='CloudflaredExeComp' />
+      <ComponentRef Id='StartMenuShortcutComp' />
     </Feature>
   </Product>
 </Wix>
