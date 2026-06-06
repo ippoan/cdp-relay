@@ -92,9 +92,14 @@ pub fn handle_ext(method: &str, url: &str, body: &str, bridge: &ExtBridge) -> Ht
             Err(e) => HttpReply::json(400, format!("{{\"error\":{:?}}}", e)),
         },
         // 拡張 popup が「接続用プロンプト」を組み立てるために MCP URL を引く。
+        // agent の version (release tag、dev ビルドは "dev") も併せて返し popup に表示させる。
         ("GET", "/ext/info") => {
             let mcp = bridge.mcp_url().unwrap_or_default();
-            HttpReply::json(200, serde_json::json!({ "mcp_url": mcp }).to_string())
+            let version = crate::update::current_release_tag().unwrap_or("dev");
+            HttpReply::json(
+                200,
+                serde_json::json!({ "mcp_url": mcp, "version": version }).to_string(),
+            )
         }
         _ => HttpReply::text(404, "not found\n"),
     }
@@ -144,6 +149,8 @@ mod tests {
         assert_eq!(r.status, 200);
         let v: Value = serde_json::from_slice(&r.body).unwrap();
         assert_eq!(v["mcp_url"], "https://x.trycloudflare.com/mcp");
+        // dev ビルド (CDP_AGENT_RELEASE_TAG 未設定) では "dev"。
+        assert_eq!(v["version"], "dev");
     }
 
     #[test]
