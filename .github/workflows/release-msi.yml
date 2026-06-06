@@ -58,7 +58,7 @@ jobs:
         run: >
           cargo wix --package cdp-agent --no-build --nocapture
           --install-version ${{ steps.ver.outputs.version }}
-          --output target/wix/cdp-agent-${{ github.ref_name }}-x86_64.msi
+          --output target/wix/cdp-agent-${{ steps.ver.outputs.version }}-x86_64.msi
 
       - name: Upload MSI to release
         uses: softprops/action-gh-release@v2
