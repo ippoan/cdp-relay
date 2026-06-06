@@ -1,12 +1,22 @@
 <?xml version='1.0' encoding='utf-8'?>
 <!--
-  cdp-agent の WiX 定義 (cdp-relay#12 M6b)。cargo-wix (WiX v3 toolset) でビルドする。
-  rust-nfc-bridge の wix/main.wxs を雛形に、Windows Service 登録を外し、cloudflared.exe を
-  同梱した。Source は cargo-wix が提供する $(var.CargoTargetBinDir) を使う (workspace でも
-  target\release を正しく指す)。cloudflared.exe は CI が同 dir に配置してから wix を回す。
+  cdp-agent の WiX 定義 (cdp-relay#12 / #33)。cargo-wix (WiX v3 toolset) でビルドする。
+
+  **perUser install** (#33): 旧来は perMachine で C:\Program Files\ に入れていたが、
+  Program Files は admin 無しで書けず agent の self-update (self_replace) が効かない
+  ため「MSI 入れ直し+再起動」が毎回必要だった。これを user 領域
+  %LOCALAPPDATA%\Programs\cdp-relay-agent\ への perUser install に変える:
+
+    - self-update が効く (= agent 起動のたびに最新化、MSI 入れ直し不要)
+    - install / native-host 登録とも admin 不要 (UAC 無し)
+
+  perUser では user-profile 配下の component は HKCU registry を KeyPath にする必要が
+  ある (ICE38)。各 component に Software\ippoan\cdp-agent 配下の dummy 値を keypath として
+  持たせ、File は keypath にしない。
 
   自動更新は agent 内蔵 self-update (M6a) が担うので、MSI は初回 install + cloudflared 同梱に
-  徹する。MajorUpgrade で手動再 install 時の上書きは効く。
+  徹する。MajorUpgrade で再 install 時の上書きは効く。
+  cloudflared.exe / extension は CI が CargoTargetBinDir(\extension) に配置してから wix を回す。
 -->
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
 
@@ -26,7 +36,7 @@
     <Package
       InstallerVersion='450'
       Compressed='yes'
-      InstallScope='perMachine'
+      InstallScope='perUser'
       Description='cdp-relay agent - quick tunnel agent to drive local Chrome via CDP from CCoW'
       Manufacturer='$(var.Manufacturer)' />
 
@@ -37,11 +47,14 @@
     <MediaTemplate EmbedCab='yes' />
 
     <Directory Id='TARGETDIR' Name='SourceDir'>
-      <Directory Id='ProgramFiles64Folder' Name='PFiles'>
-        <Directory Id='APPLICATIONFOLDER' Name='cdp-relay-agent'>
-          <!-- MV3 拡張を同梱する。chrome://extensions で「パッケージ化されていない
-               拡張機能を読み込む」で APPLICATIONFOLDER\extension を選べる。 -->
-          <Directory Id='ExtensionFolder' Name='extension' />
+      <!-- %LOCALAPPDATA%\Programs\cdp-relay-agent\ (user 領域、admin 不要 + self-update 可) -->
+      <Directory Id='LocalAppDataFolder'>
+        <Directory Id='ProgramsFolder' Name='Programs'>
+          <Directory Id='APPLICATIONFOLDER' Name='cdp-relay-agent'>
+            <!-- MV3 拡張を同梱する。chrome://extensions で「パッケージ化されていない
+                 拡張機能を読み込む」で APPLICATIONFOLDER\extension を選べる。 -->
+            <Directory Id='ExtensionFolder' Name='extension' />
+          </Directory>
         </Directory>
       </Directory>
       <!-- スタートメニュー (プログラム一覧) のショートカット用フォルダ -->
@@ -51,38 +64,44 @@
     </Directory>
 
     <DirectoryRef Id='APPLICATIONFOLDER'>
-      <!-- agent 本体 -->
-      <Component Id='CdpAgentExeComp' Guid='4601455F-4C8C-43C6-BCA1-4A840029E559' Win64='yes'>
+      <!-- agent 本体。perUser なので KeyPath は HKCU registry にする (ICE38)。 -->
+      <Component Id='CdpAgentExeComp' Guid='C4854C3E-A2D6-4589-84F7-182E926E9C70' Win64='yes'>
         <File
           Id='CdpAgentExe'
           Name='cdp-agent.exe'
           DiskId='1'
-          Source='$(var.CargoTargetBinDir)\cdp-agent.exe'
-          KeyPath='yes' />
+          Source='$(var.CargoTargetBinDir)\cdp-agent.exe' />
+        <RegistryValue Root='HKCU' Key='Software\ippoan\cdp-agent'
+          Name='exe' Type='integer' Value='1' KeyPath='yes' />
       </Component>
 
       <!-- cloudflared.exe を同梱 (CI が CargoTargetBinDir に配置してから wix を回す) -->
-      <Component Id='CloudflaredExeComp' Guid='D29D3727-E3F2-4D41-8D37-18A5DF48D762' Win64='yes'>
+      <Component Id='CloudflaredExeComp' Guid='76975942-279F-4DF1-9166-09978BF73330' Win64='yes'>
         <File
           Id='CloudflaredExe'
           Name='cloudflared.exe'
           DiskId='1'
-          Source='$(var.CargoTargetBinDir)\cloudflared.exe'
-          KeyPath='yes' />
+          Source='$(var.CargoTargetBinDir)\cloudflared.exe' />
+        <RegistryValue Root='HKCU' Key='Software\ippoan\cdp-agent'
+          Name='cloudflared' Type='integer' Value='1' KeyPath='yes' />
       </Component>
     </DirectoryRef>
 
     <!-- 拡張ファイルを extension\ に同梱 (CI が CargoTargetBinDir\extension に配置) -->
     <DirectoryRef Id='ExtensionFolder'>
-      <Component Id='ExtensionComp' Guid='31598723-9CD9-48A4-BE5E-5B00F7BAD850' Win64='yes'>
+      <Component Id='ExtensionComp' Guid='0DCE9183-5D86-4113-9A58-90D5BAF13E4C' Win64='yes'>
         <File Id='ExtManifest' Name='manifest.json'
-          Source='$(var.CargoTargetBinDir)\extension\manifest.json' KeyPath='yes' />
+          Source='$(var.CargoTargetBinDir)\extension\manifest.json' />
         <File Id='ExtBackground' Name='background.js'
           Source='$(var.CargoTargetBinDir)\extension\background.js' />
         <File Id='ExtPopupHtml' Name='popup.html'
           Source='$(var.CargoTargetBinDir)\extension\popup.html' />
         <File Id='ExtPopupJs' Name='popup.js'
           Source='$(var.CargoTargetBinDir)\extension\popup.js' />
+        <!-- uninstall 時に extension\ を片付ける (空なら削除)。 -->
+        <RemoveFolder Id='RemoveExtensionFolder' On='uninstall' />
+        <RegistryValue Root='HKCU' Key='Software\ippoan\cdp-agent'
+          Name='extension' Type='integer' Value='1' KeyPath='yes' />
       </Component>
     </DirectoryRef>
 
