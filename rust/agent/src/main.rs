@@ -1,35 +1,24 @@
-//! cdp-agent — M1 (土台実証) 用の最小 agent。
+//! cdp-agent — 手元マシンで動かす agent (cdp-relay#12)。
 //!
-//! 1. 127.0.0.1 の任意 port に echo server (std::net) を立てる
+//! 1. 127.0.0.1 の任意 port に HTTP server (tiny_http) を立てる
+//!    - `GET  /ping` … M1 互換の疎通確認 (echo)
+//!    - `POST /mcp`  … MCP server (M5、tool は今 stub。CDP 実体は M2/NM で接続)
 //! 2. `cloudflared tunnel --url http://localhost:<port>` を spawn する
 //! 3. cloudflared の出力から `https://<rnd>.trycloudflare.com` を拾って stdout に出す
 //!
-//! これで「手元から張った quick tunnel に CCoW (cdp-prober) が 443 で到達できるか」を
-//! 実証する。実トラフィックを手元で受ける agent の骨格でもある (cdp-relay#12 M1)。
-//!
-//! 依存ゼロ。CCoW では cloudflared が edge:7844 に届かない (#10) ので tunnel 払い出しは
-//! 手元で実行する。`CLOUDFLARED_BIN` で cloudflared バイナリの path を上書きできる。
+//! CCoW では cloudflared が edge:7844 に届かない (#10) ので tunnel 払い出しは手元で
+//! 実行する。`CLOUDFLARED_BIN` で cloudflared バイナリの path を上書きできる。
+//! `CDP_AGENT_ECHO_ONLY=1` で cloudflared を spawn せず HTTP server だけ起動する。
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+mod mcp;
+mod server;
+
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::thread;
 
-fn handle(mut s: TcpStream) {
-    let peer = s.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-    let mut buf = [0u8; 2048];
-    let n = s.read(&mut buf).unwrap_or(0);
-    let req = String::from_utf8_lossy(&buf[..n]);
-    let line = req.lines().next().unwrap_or("");
-    let path = line.split_whitespace().nth(1).unwrap_or("/");
-    let body = format!("pong from cdp-agent\npath={path}\npeer={peer}\n");
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = s.write_all(resp.as_bytes());
-}
+use tiny_http::{Header, Response, Server};
 
 /// cloudflared のログ 1 行から quick tunnel URL を抽出する。
 fn extract_url(line: &str) -> Option<String> {
@@ -46,14 +35,34 @@ fn extract_url(line: &str) -> Option<String> {
     }
 }
 
+/// tiny_http のリクエストを server::handle_http に橋渡しして応答する。
+fn serve(server: Arc<Server>) {
+    for mut request in server.incoming_requests() {
+        let method = request.method().as_str().to_string();
+        let url = request.url().to_string();
+        let mut body = String::new();
+        let _ = request.as_reader().read_to_string(&mut body);
+
+        let reply = server::handle_http(&method, &url, &body);
+        let mut response = Response::from_data(reply.body).with_status_code(reply.status);
+        for (k, v) in &reply.headers {
+            if let Ok(h) = Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+                response.add_header(h);
+            }
+        }
+        let _ = request.respond(response);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "cdp-agent — cf quick tunnel + echo server (cdp-relay#12 M1)\n\n\
+            "cdp-agent — cf quick tunnel + /mcp MCP server (cdp-relay#12)\n\n\
              usage: cdp-agent\n  \
-             CDP_AGENT_ECHO_ONLY=1   echo server だけ起動 (tunnel を張らない)\n  \
-             CLOUDFLARED_BIN=<path>  cloudflared バイナリの path を上書き"
+             CDP_AGENT_ECHO_ONLY=1   HTTP server だけ起動 (tunnel を張らない)\n  \
+             CLOUDFLARED_BIN=<path>  cloudflared バイナリの path を上書き\n\n\
+             endpoints: GET /ping (echo) / POST /mcp (MCP server)"
         );
         return;
     }
@@ -62,23 +71,22 @@ fn main() {
         return;
     }
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind echo server");
-    let port = listener.local_addr().unwrap().port();
-    eprintln!("[cdp-agent] echo server: http://127.0.0.1:{port}  (GET /ping -> pong)");
+    let server = Arc::new(Server::http("127.0.0.1:0").expect("bind http server"));
+    let port = server
+        .server_addr()
+        .to_ip()
+        .map(|a| a.port())
+        .expect("server addr");
+    eprintln!("[cdp-agent] http server: http://127.0.0.1:{port}  (GET /ping, POST /mcp)");
 
-    thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            thread::spawn(move || handle(stream));
-        }
-    });
+    let serve_server = Arc::clone(&server);
+    let serve_thread = thread::spawn(move || serve(serve_server));
 
-    // CDP_AGENT_ECHO_ONLY=1: cloudflared を spawn せず echo server だけ前面で回す。
-    // tunnel を張らずに echo server ⇄ prober の往復ロジックだけを確認する用途 (CCoW でも可)。
+    // CDP_AGENT_ECHO_ONLY=1: cloudflared を spawn せず HTTP server だけ回す。
     if std::env::var("CDP_AGENT_ECHO_ONLY").is_ok() {
         println!("ECHO_PORT={port}");
-        loop {
-            thread::sleep(std::time::Duration::from_secs(3600));
-        }
+        let _ = serve_thread.join();
+        return;
     }
 
     let bin = std::env::var("CLOUDFLARED_BIN").unwrap_or_else(|_| "cloudflared".into());
@@ -115,6 +123,7 @@ fn main() {
                     println!(
                         "\n=== QUICK TUNNEL URL ===\n{u}\n\
                          CCoW で到達確認:  cargo run -p cdp-prober -- {u}\n\
+                         MCP として使う:   {u}/mcp\n\
                          ========================\n"
                     );
                 }
