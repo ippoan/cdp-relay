@@ -12,12 +12,20 @@
 //! しない (= 開発中の自分を上書きしない)。
 
 use serde_json::Value;
+use std::io::Read as _;
 use std::sync::Arc;
 use std::time::Duration;
 
 const RELEASES_API: &str = "https://api.github.com/repos/ippoan/cdp-relay/releases?per_page=100";
 const TAG_PREFIX: &str = "cdp-agent-dev-";
 const WIN_ASSET_MARK: &str = "x86_64-pc-windows-msvc";
+
+/// asset DL を許可する host (GitHub Releases とその CDN のみ)。asset_url は
+/// `ippoan/cdp-relay` の releases API (TLS, host 固定) が返すものだが、SSRF / 偽 host
+/// への redirect を防ぐ defense-in-depth として host を pin する。
+const ASSET_HOST_ALLOWLIST: &[&str] = &["github.com", "objects.githubusercontent.com"];
+/// DL / 展開のサイズ上限 (zip bomb / 無制限 DL 対策)。実 release zip より十分大きい。
+const MAX_ASSET_BYTES: u64 = 64 * 1024 * 1024;
 
 /// build.rs が埋め込んだ現在のリリース tag。ローカル dev ビルドでは None。
 pub fn current_release_tag() -> Option<&'static str> {
@@ -84,6 +92,19 @@ fn pick_windows_asset(release: &Value) -> Option<String> {
     None
 }
 
+/// asset URL を https + host allowlist で検証する (SSRF / 偽 host への置換を防ぐ)。
+fn validate_asset_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("asset url parse: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("asset url must be https".into());
+    }
+    match parsed.host_str() {
+        Some(h) if ASSET_HOST_ALLOWLIST.contains(&h) => Ok(()),
+        Some(h) => Err(format!("asset host not allowed: {h}")),
+        None => Err("asset url has no host".into()),
+    }
+}
+
 fn build_agent() -> ureq::Agent {
     ureq::builder()
         .tls_connector(Arc::new(
@@ -119,13 +140,21 @@ pub fn check_and_self_update() -> Result<Option<String>, String> {
 
 /// zip asset を DL → 中の cdp-agent.exe を temp に取り出して self_replace で現 exe を差し替える。
 fn download_and_replace(agent: &ureq::Agent, url: &str) -> Result<(), String> {
+    validate_asset_url(url)?;
     let resp = agent
         .get(url)
         .set("User-Agent", "cdp-agent-self-update")
         .call()
         .map_err(|e| format!("asset DL 失敗: {e}"))?;
+    // zip bomb / 無制限 DL 対策で上限を被せる。上限到達は truncate せず reject。
     let mut bytes: Vec<u8> = Vec::new();
-    std::io::copy(&mut resp.into_reader(), &mut bytes).map_err(|e| e.to_string())?;
+    resp.into_reader()
+        .take(MAX_ASSET_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_ASSET_BYTES {
+        return Err("asset が上限サイズを超過".into());
+    }
 
     let reader = std::io::Cursor::new(bytes);
     let mut zip = zip::ZipArchive::new(reader).map_err(|e| format!("zip 展開失敗: {e}"))?;
@@ -144,9 +173,15 @@ fn download_and_replace(agent: &ureq::Agent, url: &str) -> Result<(), String> {
 
     let tmp = std::env::temp_dir().join("cdp-agent-update.tmp");
     {
-        let mut entry = zip.by_index(idx).map_err(|e| e.to_string())?;
+        let entry = zip.by_index(idx).map_err(|e| e.to_string())?;
         let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+        // 展開も上限で cap (zip bomb 対策)。
+        let written = std::io::copy(&mut entry.take(MAX_ASSET_BYTES + 1), &mut out)
+            .map_err(|e| e.to_string())?;
+        if written > MAX_ASSET_BYTES {
+            let _ = std::fs::remove_file(&tmp);
+            return Err("展開後サイズが上限超過".into());
+        }
     }
     self_replace::self_replace(&tmp).map_err(|e| format!("self_replace 失敗: {e}"))?;
     let _ = std::fs::remove_file(&tmp);
@@ -235,6 +270,22 @@ mod tests {
         )]);
         // current None (ローカル dev) は自動更新しない。
         assert!(pick_newer(None, &releases).is_none());
+    }
+
+    #[test]
+    fn validate_asset_url_allows_github_https() {
+        assert!(validate_asset_url(
+            "https://github.com/ippoan/cdp-relay/releases/download/cdp-agent-dev-7/x.zip"
+        )
+        .is_ok());
+        assert!(validate_asset_url("https://objects.githubusercontent.com/abc/def").is_ok());
+    }
+
+    #[test]
+    fn validate_asset_url_rejects_bad_host_and_scheme() {
+        assert!(validate_asset_url("https://evil.example.com/x.zip").is_err());
+        assert!(validate_asset_url("http://github.com/x.zip").is_err());
+        assert!(validate_asset_url("not-a-url").is_err());
     }
 
     #[test]
