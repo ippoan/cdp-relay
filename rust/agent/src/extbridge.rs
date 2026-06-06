@@ -37,6 +37,9 @@ pub struct ExtBridge {
     cmd_rx: Mutex<Receiver<Command>>,
     pending: Mutex<HashMap<u64, Sender<Result<Value, String>>>>,
     next_id: AtomicU64,
+    /// quick tunnel の MCP URL (cloudflared が出たら main が set)。拡張の /ext/info が
+    /// これを返し、popup が「接続用プロンプト」に埋め込む。
+    mcp_url: Mutex<Option<String>>,
 }
 
 impl Default for ExtBridge {
@@ -53,7 +56,18 @@ impl ExtBridge {
             cmd_rx: Mutex::new(cmd_rx),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            mcp_url: Mutex::new(None),
         }
+    }
+
+    /// quick tunnel の MCP URL を記録する (main が cloudflared URL 取得時に呼ぶ)。
+    pub fn set_mcp_url(&self, url: String) {
+        *self.mcp_url.lock().unwrap() = Some(url);
+    }
+
+    /// 記録済みの MCP URL を返す (未確定なら None)。
+    pub fn mcp_url(&self) -> Option<String> {
+        self.mcp_url.lock().unwrap().clone()
     }
 
     /// 拡張が `/ext/poll` で 1 コマンドを引き取る。最大 `timeout` 待って無ければ None。
@@ -164,6 +178,17 @@ mod tests {
     fn poll_times_out_when_no_command() {
         let bridge = ExtBridge::new();
         assert!(bridge.poll(Duration::from_millis(50)).is_none());
+    }
+
+    #[test]
+    fn mcp_url_set_and_get() {
+        let bridge = ExtBridge::new();
+        assert!(bridge.mcp_url().is_none());
+        bridge.set_mcp_url("https://x.trycloudflare.com/mcp".into());
+        assert_eq!(
+            bridge.mcp_url().as_deref(),
+            Some("https://x.trycloudflare.com/mcp")
+        );
     }
 
     #[test]

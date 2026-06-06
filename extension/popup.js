@@ -65,6 +65,37 @@ $("reload").addEventListener("click", () => {
   }
 });
 
+// 接続用プロンプトをコピー: agent の /ext/info から MCP URL を取り、現在タブと併せて
+// CCoW (Claude) に貼るだけで手元 Chrome を操作開始できるプロンプトをクリップボードへ。
+$("copyPrompt").addEventListener("click", async () => {
+  try {
+    const relayUrl = ($("relayUrl").value.trim() || "http://127.0.0.1:19222").replace(/\/+$/, "");
+    const info = await fetch(`${relayUrl}/ext/info`)
+      .then((r) => r.json())
+      .catch(() => ({ mcp_url: "" }));
+    const mcp = info.mcp_url || "";
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const here = tab && tab.url ? tab.url : "(現在のタブ)";
+
+    if (!mcp) {
+      setStatus("MCP URL 未確定（agent が tunnel を張るまで待つ）", "err");
+      return;
+    }
+    const prompt =
+      `手元 Chrome を cdp-relay 経由で操作してください。\n` +
+      `MCP エンドポイント: ${mcp}\n\n` +
+      `この MCP に対し tools/call で browser_navigate / browser_screenshot を使えます。\n` +
+      `まず browser_screenshot で現在の画面（${here}）を確認してから、指示に従って操作してください。\n\n` +
+      `例: curl -sS -X POST ${mcp} -H 'Content-Type: application/json' \\\n` +
+      `  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"browser_screenshot","arguments":{}}}'`;
+
+    await navigator.clipboard.writeText(prompt);
+    setStatus("接続用プロンプトをコピーしました（CCoW に貼り付け）", "ok");
+  } catch (e) {
+    setStatus("コピー失敗: " + (e && e.message ? e.message : String(e)), "err");
+  }
+});
+
 // background からの状態通知。
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "cdp-relay-status") {
