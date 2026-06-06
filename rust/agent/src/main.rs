@@ -12,6 +12,7 @@
 
 mod mcp;
 mod server;
+mod update;
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -87,6 +88,18 @@ fn main() {
         println!("ECHO_PORT={port}");
         let _ = serve_thread.join();
         return;
+    }
+
+    // 起動時 self-update を背景で実行 (#12 M6)。dev ビルドや最新時は no-op。
+    // CDP_AGENT_NO_SELFUPDATE を立てると無効化。差し替えは次回起動で反映される。
+    if std::env::var("CDP_AGENT_NO_SELFUPDATE").is_err() {
+        thread::spawn(|| match update::check_and_self_update() {
+            Ok(Some(tag)) => {
+                eprintln!("[cdp-agent] self-update: {tag} を取得。次回起動で反映されます")
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[cdp-agent] self-update skip: {e}"),
+        });
     }
 
     let bin = std::env::var("CLOUDFLARED_BIN").unwrap_or_else(|_| "cloudflared".into());
