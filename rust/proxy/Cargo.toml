@@ -1,0 +1,19 @@
+[package]
+name = "cdp-proxy"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CCoW 側の stdio MCP proxy。rendezvous で tunnel_url を引き、MCP を手元 agent に透過転送する (cdp-relay#12 M4)"
+
+# Claude Code は固定の stdio MCP server にしか繋げない (runtime で接続先 URL を
+# 切り替えられない)。proxy が固定 stdio を被り、起動時に rendezvous で揮発する
+# tunnel_url を引いて以降の MCP を tunnel に転送する。これで「最初だけ DO、あと手元」
+# が Claude 側の挙動に依存せず確実に成立する。
+#
+# TLS は native-tls (システム CA)。CCoW egress gateway の MITM CA はシステム store
+# にだけ在るため (#12 M1 で実証、prober と同方針)。
+[dependencies]
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+native-tls = "0.2"
+serde_json = "1"
