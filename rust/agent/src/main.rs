@@ -14,6 +14,7 @@
 
 mod extbridge;
 mod mcp;
+mod register;
 mod server;
 mod update;
 
@@ -79,7 +80,10 @@ fn main() {
              CDP_AGENT_ECHO_ONLY=1   HTTP server だけ起動 (tunnel を張らない)\n  \
              CLOUDFLARED_BIN=<path>  cloudflared バイナリの path を上書き\n  \
              CDP_AGENT_EXT_PORT=<n>  ext server の port (default 19222、拡張の接続先)\n  \
-             CDP_AGENT_NO_SELFUPDATE 起動時 self-update を無効化\n\n\
+             CDP_AGENT_NO_SELFUPDATE 起動時 self-update を無効化\n  \
+             CDP_AGENT_SESSION=<s>   rendezvous の session 名 (TOKEN と併せて tunnel URL を登録)\n  \
+             CDP_AGENT_TOKEN=<t>     rendezvous の token (= RELAY_TOKEN)\n  \
+             CDP_AGENT_RENDEZVOUS=<u> rendezvous base (default https://cdp-relay.ippoan.org)\n\n\
              ports: MCP (/ping,/mcp; tunnel 公開) と ext (/ext/poll,/ext/result; localhost 専用)"
         );
         return;
@@ -177,6 +181,22 @@ fn main() {
                          拡張の接続先:     http://127.0.0.1:{ext_port} (localhost、tunnel しない)\n\
                          ========================\n"
                     );
+                    // rendezvous: session/token があれば tunnel URL を DO に登録する。
+                    // CCoW 側 cdp-proxy が同 session/token で /lookup して固定 stdio のまま
+                    // 揮発 URL に追従できる。
+                    if let (Ok(session), Ok(token)) = (
+                        std::env::var("CDP_AGENT_SESSION"),
+                        std::env::var("CDP_AGENT_TOKEN"),
+                    ) {
+                        let rdv = std::env::var("CDP_AGENT_RENDEZVOUS")
+                            .unwrap_or_else(|_| "https://cdp-relay.ippoan.org".into());
+                        match register::register_tunnel(&rdv, &session, &token, &u) {
+                            Ok(()) => {
+                                eprintln!("[cdp-agent] rendezvous 登録: {rdv} session={session}")
+                            }
+                            Err(e) => eprintln!("[cdp-agent] rendezvous 登録失敗: {e}"),
+                        }
+                    }
                 }
             }
         }
