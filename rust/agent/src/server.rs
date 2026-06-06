@@ -91,6 +91,11 @@ pub fn handle_ext(method: &str, url: &str, body: &str, bridge: &ExtBridge) -> Ht
             Ok(()) => HttpReply::json(200, "{\"ok\":true}".to_string()),
             Err(e) => HttpReply::json(400, format!("{{\"error\":{:?}}}", e)),
         },
+        // 拡張 popup が「接続用プロンプト」を組み立てるために MCP URL を引く。
+        ("GET", "/ext/info") => {
+            let mcp = bridge.mcp_url().unwrap_or_default();
+            HttpReply::json(200, serde_json::json!({ "mcp_url": mcp }).to_string())
+        }
         _ => HttpReply::text(404, "not found\n"),
     }
 }
@@ -129,6 +134,16 @@ mod tests {
         // handle_ext は POLL_TIMEOUT 待つので、ここでは bridge.poll の短 timeout で
         // 「空なら None」だけ確認する。
         assert!(b.poll(Duration::from_millis(10)).is_none());
+    }
+
+    #[test]
+    fn ext_info_returns_mcp_url() {
+        let b = ExtBridge::new();
+        b.set_mcp_url("https://x.trycloudflare.com/mcp".into());
+        let r = handle_ext("GET", "/ext/info", "", &b);
+        assert_eq!(r.status, 200);
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(v["mcp_url"], "https://x.trycloudflare.com/mcp");
     }
 
     #[test]

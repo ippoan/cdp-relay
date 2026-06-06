@@ -178,6 +178,7 @@ fn main() {
 
     // cloudflared はログを stderr に出す。1 行ずつ読んで URL を拾う。
     let stderr = child.stderr.take().unwrap();
+    let bridge_for_url = Arc::clone(&bridge);
     let url_thread = thread::spawn(move || {
         let mut found = false;
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
@@ -185,6 +186,8 @@ fn main() {
             if !found {
                 if let Some(u) = extract_url(&line) {
                     found = true;
+                    // 拡張の /ext/info 用に MCP URL を記録。
+                    bridge_for_url.set_mcp_url(format!("{u}/mcp"));
                     println!(
                         "\n=== QUICK TUNNEL URL ===\n{u}\n\
                          MCP として使う:   {u}/mcp\n\
