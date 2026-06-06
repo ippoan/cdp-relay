@@ -7,10 +7,18 @@ const $ = (id) => document.getElementById(id);
 // clipboard.writeText が拒否されるため (cdp-relay#33)。
 let cachedMcpUrl = "";
 let activeTabUrl = "";
+let extVer = "";
+let agentVer = "";
+
+// ヘッダのバージョン表示。拡張 version は常に、agent version は /ext/info 取得後に併記。
+function renderVer() {
+  $("ver").textContent = "ext v" + extVer + (agentVer ? "  ·  agent " + agentVer : "");
+}
 
 async function restore() {
-  // 現在の拡張バージョンを表示 (manifest.json の version)。
-  $("ver").textContent = "v" + chrome.runtime.getManifest().version;
+  // 現在の拡張バージョンを表示 (manifest.json の version)。agent version は後で併記。
+  extVer = chrome.runtime.getManifest().version;
+  renderVer();
 
   const c = await chrome.storage.local.get(["relayUrl", "session", "token", "tabId"]);
   // 未設定なら手元 agent (固定 ext port 19222) を既定で埋める。
@@ -59,6 +67,10 @@ async function refreshMcpUrl() {
   try {
     const info = await fetch(`${relayUrl}/ext/info`).then((r) => r.json());
     cachedMcpUrl = (info && info.mcp_url) || "";
+    if (info && info.version) {
+      agentVer = info.version;
+      renderVer();
+    }
   } catch {
     cachedMcpUrl = "";
   }
