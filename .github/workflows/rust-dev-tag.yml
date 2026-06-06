@@ -12,7 +12,10 @@ on:
     branches: [main]
     paths:
       - 'rust/**'
+      # 拡張も cdp-agent-dev-N に一本化 (release-msi が MSI + 拡張 zip を出す)。
+      - 'extension/**'
       - '.github/workflows/rust-dev-tag.yml'
+      - '.github/workflows/release-msi.yml'
 
 permissions:
   contents: write
