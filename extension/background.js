@@ -1,20 +1,33 @@
 /**
  * cdp-relay MV3 拡張 — service worker。
  *
- * popup で保存した設定 ({ relayUrl, session, token, tabId }) を使って
- * `wss://<relayUrl>/ext/<session>?token=<token>` に outbound 接続し、Worker+DO が
- * 転送する高レベル method を CDP (chrome.debugger.sendCommand) に翻訳して実行する。
+ * 2 つの接続モードを持つ:
  *
- *   navigate   → Page.navigate + Page.loadEventFired 待ち
- *   screenshot → Page.captureScreenshot → PNG を /shot に PUT → { shot_url }
+ *  - **WS モード** (Relay URL が remote、例 https://cdp-relay.ippoan.org):
+ *    `wss://<relayUrl>/ext/<session>?token=<token>` に outbound 接続し、Worker+DO が
+ *    転送する method を CDP に翻訳する。screenshot は PNG を /shot に PUT して shot_url。
  *
- * MV3 の service worker は idle で停止するため、WS の周期 ping と chrome.alarms で
- * 接続を生かし続ける (Chrome 116+ は WS activity が SW lifetime を延長する)。
+ *  - **agent モード** (Relay URL が http://127.0.0.1:<extPort> / localhost):
+ *    手元 cdp-agent の ext port に **long-poll** で繋ぐ (cdp-relay#12 M2)。
+ *    `GET /ext/poll` で CDP コマンドを引き、実行結果を `POST /ext/result` で返す。
+ *    session / token は不要 (localhost 専用 port)。screenshot は base64 PNG を
+ *    `{ data }` で直接返す (agent が MCP image content にする)。
+ *
+ * MV3 の service worker は idle で停止するため、WS の周期 ping / agent の long-poll
+ * (= 継続的な fetch) で接続を生かし続ける。
  */
 
 let ws = null;
 let attachedTabId = null;
+let agentRunning = false;
 const KEEPALIVE_ALARM = "cdp-relay-keepalive";
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Relay URL が localhost (= agent モード) か。 */
+function isAgentUrl(relayUrl) {
+  return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(relayUrl.trim());
+}
 
 /** popup / storage の設定を読む。 */
 async function loadConfig() {
@@ -49,10 +62,17 @@ function toHttpsBase(relayUrl) {
   return "https://" + u;
 }
 
+/** 対象タブに debugger attach する (共通)。 */
+async function attach(tabId) {
+  await chrome.debugger.attach({ tabId }, "1.3");
+  await chrome.debugger.sendCommand({ tabId }, "Page.enable");
+  attachedTabId = tabId;
+}
+
 async function connect() {
   const cfg = await loadConfig();
-  if (!cfg.relayUrl || !cfg.session || !cfg.token) {
-    reportStatus("error", "relayUrl / session / token が未設定");
+  if (!cfg.relayUrl) {
+    reportStatus("error", "Relay URL が未設定");
     return;
   }
   if (cfg.tabId == null) {
@@ -60,14 +80,29 @@ async function connect() {
     return;
   }
 
-  // 既存接続/attach を片付ける。
   await disconnect();
 
-  // 対象タブに debugger attach。
+  // agent モード: localhost の cdp-agent に long-poll で繋ぐ。session/token 不要。
+  if (isAgentUrl(cfg.relayUrl)) {
+    try {
+      await attach(cfg.tabId);
+    } catch (e) {
+      reportStatus("error", "debugger attach 失敗: " + (e && e.message ? e.message : String(e)));
+      return;
+    }
+    agentRunning = true;
+    reportStatus("connected", `agent mode tab=${cfg.tabId}`);
+    agentLoop(cfg); // 非 await: 背景で回す
+    return;
+  }
+
+  // WS モード: remote Worker+DO に接続。session/token 必須。
+  if (!cfg.session || !cfg.token) {
+    reportStatus("error", "session / token が未設定 (WS モード)");
+    return;
+  }
   try {
-    await chrome.debugger.attach({ tabId: cfg.tabId }, "1.3");
-    await chrome.debugger.sendCommand({ tabId: cfg.tabId }, "Page.enable");
-    attachedTabId = cfg.tabId;
+    await attach(cfg.tabId);
   } catch (e) {
     reportStatus("error", "debugger attach 失敗: " + (e && e.message ? e.message : String(e)));
     return;
@@ -98,7 +133,7 @@ async function connect() {
     const { id, method, params } = msg;
     if (typeof id !== "number" || typeof method !== "string") return;
     try {
-      const result = await handle(method, params || {}, cfg);
+      const result = await handle(method, params || {}, cfg, "ws");
       ws.send(JSON.stringify({ id, result }));
     } catch (e) {
       ws.send(JSON.stringify({ id, error: e && e.message ? e.message : String(e) }));
@@ -106,7 +141,51 @@ async function connect() {
   };
 }
 
+/** agent モード: ext port に long-poll して CDP コマンドを往復する。 */
+async function agentLoop(cfg) {
+  const base = cfg.relayUrl.trim().replace(/\/+$/, "");
+  while (agentRunning) {
+    let res;
+    try {
+      res = await fetch(`${base}/ext/poll`);
+    } catch {
+      await sleep(1000); // agent が落ちている等。間を置いて再試行。
+      continue;
+    }
+    if (res.status === 204) continue; // long-poll 空振り → 再 poll
+    if (!res.ok) {
+      await sleep(1000);
+      continue;
+    }
+    let cmd;
+    try {
+      cmd = await res.json();
+    } catch {
+      continue;
+    }
+    if (typeof cmd.id !== "number" || typeof cmd.method !== "string") continue;
+
+    let body;
+    try {
+      const result = await handle(cmd.method, cmd.params || {}, cfg, "agent");
+      body = { id: cmd.id, result };
+    } catch (e) {
+      body = { id: cmd.id, error: e && e.message ? e.message : String(e) };
+    }
+    try {
+      await fetch(`${base}/ext/result`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      /* 結果返送に失敗しても次の poll を続ける */
+    }
+  }
+}
+
 async function disconnect() {
+  agentRunning = false;
   chrome.alarms.clear(KEEPALIVE_ALARM);
   if (ws) {
     try {
@@ -126,8 +205,12 @@ async function disconnect() {
   }
 }
 
-/** 高レベル method を CDP に翻訳して実行する。 */
-async function handle(method, params, cfg) {
+/**
+ * 高レベル method を CDP に翻訳して実行する。
+ * mode="agent" は screenshot を base64 PNG `{ data }` で返す (agent が image content 化)。
+ * mode="ws" は screenshot を /shot に PUT して `{ shot_url }` を返す。
+ */
+async function handle(method, params, cfg, mode) {
   const target = { tabId: cfg.tabId };
   switch (method) {
     case "navigate": {
@@ -141,6 +224,9 @@ async function handle(method, params, cfg) {
       const shot = await chrome.debugger.sendCommand(target, "Page.captureScreenshot", {
         format: "png",
       });
+      if (mode === "agent") {
+        return { data: shot.data }; // base64 PNG をそのまま返す
+      }
       const bytes = base64ToBytes(shot.data);
       const shotUrl = await uploadShot(bytes, cfg);
       return { shot_url: shotUrl };
@@ -168,7 +254,7 @@ function waitForLoad(target) {
   });
 }
 
-/** PNG bytes を Worker の /shot に PUT して shot_url を得る。 */
+/** PNG bytes を Worker の /shot に PUT して shot_url を得る (WS モードのみ)。 */
 async function uploadShot(bytes, cfg) {
   const httpsBase = toHttpsBase(cfg.relayUrl);
   const url = `${httpsBase}/shot/${encodeURIComponent(cfg.session)}?token=${encodeURIComponent(cfg.token)}`;
@@ -202,7 +288,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false;
 });
 
-// keepalive: WS が開いていれば ping を打って SW を生かす。
+// keepalive: WS が開いていれば ping を打って SW を生かす (agent モードは long-poll fetch が生かす)。
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM && ws && ws.readyState === WebSocket.OPEN) {
     try {
