@@ -43,6 +43,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cdp-proxy"
+version = "0.0.0"
+dependencies = [
+ "native-tls",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -629,6 +638,8 @@ dependencies = [
  "log",
  "native-tls",
  "once_cell",
+ "serde",
+ "serde_json",
  "url",
 ]
 
