@@ -72,6 +72,28 @@ fn bind_port(server: &Server) -> u16 {
         .expect("server addr")
 }
 
+/// self-update 後に、差し替え済みの新版 exe を detached で起動する (#33)。呼び出し側は
+/// この後 `return` して現プロセスを終了し、新版に引き継ぐ。self_replace は on-disk の exe
+/// を差し替えるだけで動作中プロセスには反映されないため、これをやらないと長時間起動しっぱなしの
+/// agent では更新が永遠に効かない。Windows は console 無し + detached で起動する。
+fn restart_into_new_binary() -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = Command::new(&exe);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+    cmd.spawn()?;
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -131,6 +153,27 @@ fn main() {
         return;
     }
 
+    // 起動時 self-update (#33): 新版があれば取得して **新版で自動再起動** する。これを
+    // server / cloudflared を立てる前に同期でやるので、再起動しても orphan な子プロセスは
+    // 残らない。dev ビルド (tag 無し) は check_and_self_update が即 None を返すので no-op。
+    // CDP_AGENT_NO_SELFUPDATE / ECHO_ONLY では skip。
+    if std::env::var("CDP_AGENT_NO_SELFUPDATE").is_err()
+        && std::env::var("CDP_AGENT_ECHO_ONLY").is_err()
+    {
+        match update::check_and_self_update() {
+            Ok(Some(tag)) => {
+                eprintln!("[cdp-agent] self-update: {tag} を取得 → 新版で再起動します");
+                let _ = update::update_extension();
+                match restart_into_new_binary() {
+                    Ok(()) => return, // 現プロセス終了、新版 exe が引き継ぐ
+                    Err(e) => eprintln!("[cdp-agent] 再起動 spawn 失敗、現版で続行: {e}"),
+                }
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[cdp-agent] self-update skip: {e}"),
+        }
+    }
+
     let bridge = Arc::new(ExtBridge::new());
 
     // MCP server (tunnel 公開) は動的 port (cloudflared が拾う)。
@@ -180,24 +223,13 @@ fn main() {
         return;
     }
 
-    // 起動時 self-update を背景で実行 (#12 M6)。dev ビルドや最新時は no-op。
+    // binary は早期 self-update 済み。ここでは拡張ファイルの refresh だけ背景で行う
+    // (binary が最新でも同梱拡張が古いケースの保険。Chrome 再読込で反映)。
     if std::env::var("CDP_AGENT_NO_SELFUPDATE").is_err() {
-        thread::spawn(|| {
-            match update::check_and_self_update() {
-                Ok(Some(tag)) => {
-                    eprintln!("[cdp-agent] self-update: {tag} を取得。次回起動で反映されます")
-                }
-                Ok(None) => {}
-                Err(e) => eprintln!("[cdp-agent] self-update skip: {e}"),
-            }
-            // 同梱拡張 (unpacked) も最新に更新する。Chrome 起動/再起動で反映。
-            match update::update_extension() {
-                Ok(Some(tag)) => {
-                    eprintln!("[cdp-agent] 拡張を更新: {tag} (Chrome 再起動で反映)")
-                }
-                Ok(None) => {}
-                Err(e) => eprintln!("[cdp-agent] 拡張更新 skip: {e}"),
-            }
+        thread::spawn(|| match update::update_extension() {
+            Ok(Some(tag)) => eprintln!("[cdp-agent] 拡張を更新: {tag} (Chrome 再読込で反映)"),
+            Ok(None) => {}
+            Err(e) => eprintln!("[cdp-agent] 拡張更新 skip: {e}"),
         });
     }
 
