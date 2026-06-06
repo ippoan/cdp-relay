@@ -78,6 +78,7 @@ fn main() {
              usage: cdp-agent\n  \
              CDP_AGENT_ECHO_ONLY=1   HTTP server だけ起動 (tunnel を張らない)\n  \
              CLOUDFLARED_BIN=<path>  cloudflared バイナリの path を上書き\n  \
+             CDP_AGENT_EXT_PORT=<n>  ext server の port (default 19222、拡張の接続先)\n  \
              CDP_AGENT_NO_SELFUPDATE 起動時 self-update を無効化\n\n\
              ports: MCP (/ping,/mcp; tunnel 公開) と ext (/ext/poll,/ext/result; localhost 専用)"
         );
@@ -90,9 +91,20 @@ fn main() {
 
     let bridge = Arc::new(ExtBridge::new());
 
-    // MCP server (tunnel 公開) と ext server (localhost 専用) を別 port で。
+    // MCP server (tunnel 公開) は動的 port (cloudflared が拾う)。
     let mcp_server = Arc::new(Server::http("127.0.0.1:0").expect("bind mcp server"));
-    let ext_server = Arc::new(Server::http("127.0.0.1:0").expect("bind ext server"));
+    // ext server (localhost 専用) は固定 default 19222。起動毎に変わると拡張の
+    // Relay URL を入れ直す羽目になるため固定する。CDP_AGENT_EXT_PORT で上書き、
+    // 埋まっていれば動的 port に fallback する。
+    let ext_pref: u16 = std::env::var("CDP_AGENT_EXT_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(19222);
+    let ext_server = Arc::new(
+        Server::http(("127.0.0.1", ext_pref))
+            .or_else(|_| Server::http("127.0.0.1:0"))
+            .expect("bind ext server"),
+    );
     let mcp_port = bind_port(&mcp_server);
     let ext_port = bind_port(&ext_server);
     eprintln!("[cdp-agent] MCP http port {mcp_port} (tunnel 公開)  /ping /mcp");
