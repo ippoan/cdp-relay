@@ -1,15 +1,18 @@
 //! cdp-agent — 手元マシンで動かす agent (cdp-relay#12)。
 //!
-//! 1. 127.0.0.1 の任意 port に HTTP server (tiny_http) を立てる
-//!    - `GET  /ping` … M1 互換の疎通確認 (echo)
-//!    - `POST /mcp`  … MCP server (M5、tool は今 stub。CDP 実体は M2/NM で接続)
-//! 2. `cloudflared tunnel --url http://localhost:<port>` を spawn する
-//! 3. cloudflared の出力から `https://<rnd>.trycloudflare.com` を拾って stdout に出す
+//! 2 つの HTTP server を立てる:
+//!   - MCP server (cloudflared が tunnel 公開する port): `GET /ping` / `POST /mcp`
+//!   - ext server (localhost 専用・非公開 port): `GET /ext/poll` / `POST /ext/result`
 //!
-//! CCoW では cloudflared が edge:7844 に届かない (#10) ので tunnel 払い出しは手元で
-//! 実行する。`CLOUDFLARED_BIN` で cloudflared バイナリの path を上書きできる。
-//! `CDP_AGENT_ECHO_ONLY=1` で cloudflared を spawn せず HTTP server だけ起動する。
+//! MCP tool が積んだ CDP コマンドを ExtBridge 経由で拡張に渡し (long-poll)、拡張が
+//! chrome.debugger で実行した結果を返す。`/ext/*` を別 port に隔離するので、tunnel
+//! 経由で remote が command 注入 / 結果偽装できない。
+//!
+//! CCoW では cloudflared が edge:7844 に届かない (#10) ので tunnel 払い出しは手元で。
+//! `CLOUDFLARED_BIN` で path 上書き、`CDP_AGENT_ECHO_ONLY=1` で tunnel を張らず HTTP
+//! server だけ起動する。
 
+mod extbridge;
 mod mcp;
 mod server;
 mod update;
@@ -19,6 +22,8 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 
+use extbridge::ExtBridge;
+use server::HttpReply;
 use tiny_http::{Header, Response, Server};
 
 /// cloudflared のログ 1 行から quick tunnel URL を抽出する。
@@ -36,15 +41,17 @@ fn extract_url(line: &str) -> Option<String> {
     }
 }
 
-/// tiny_http のリクエストを server::handle_http に橋渡しして応答する。
-fn serve(server: Arc<Server>) {
+type Router = fn(&str, &str, &str, &ExtBridge) -> HttpReply;
+
+/// tiny_http のリクエストを router に橋渡しして応答する。
+fn serve(server: Arc<Server>, bridge: Arc<ExtBridge>, router: Router) {
     for mut request in server.incoming_requests() {
         let method = request.method().as_str().to_string();
         let url = request.url().to_string();
         let mut body = String::new();
         let _ = request.as_reader().read_to_string(&mut body);
 
-        let reply = server::handle_http(&method, &url, &body);
+        let reply = router(&method, &url, &body, &bridge);
         let mut response = Response::from_data(reply.body).with_status_code(reply.status);
         for (k, v) in &reply.headers {
             if let Ok(h) = Header::from_bytes(k.as_bytes(), v.as_bytes()) {
@@ -55,15 +62,24 @@ fn serve(server: Arc<Server>) {
     }
 }
 
+fn bind_port(server: &Server) -> u16 {
+    server
+        .server_addr()
+        .to_ip()
+        .map(|a| a.port())
+        .expect("server addr")
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "cdp-agent — cf quick tunnel + /mcp MCP server (cdp-relay#12)\n\n\
+            "cdp-agent — cf quick tunnel + /mcp MCP server + 拡張ブリッジ (cdp-relay#12)\n\n\
              usage: cdp-agent\n  \
              CDP_AGENT_ECHO_ONLY=1   HTTP server だけ起動 (tunnel を張らない)\n  \
-             CLOUDFLARED_BIN=<path>  cloudflared バイナリの path を上書き\n\n\
-             endpoints: GET /ping (echo) / POST /mcp (MCP server)"
+             CLOUDFLARED_BIN=<path>  cloudflared バイナリの path を上書き\n  \
+             CDP_AGENT_NO_SELFUPDATE 起動時 self-update を無効化\n\n\
+             ports: MCP (/ping,/mcp; tunnel 公開) と ext (/ext/poll,/ext/result; localhost 専用)"
         );
         return;
     }
@@ -72,26 +88,36 @@ fn main() {
         return;
     }
 
-    let server = Arc::new(Server::http("127.0.0.1:0").expect("bind http server"));
-    let port = server
-        .server_addr()
-        .to_ip()
-        .map(|a| a.port())
-        .expect("server addr");
-    eprintln!("[cdp-agent] http server: http://127.0.0.1:{port}  (GET /ping, POST /mcp)");
+    let bridge = Arc::new(ExtBridge::new());
 
-    let serve_server = Arc::clone(&server);
-    let serve_thread = thread::spawn(move || serve(serve_server));
+    // MCP server (tunnel 公開) と ext server (localhost 専用) を別 port で。
+    let mcp_server = Arc::new(Server::http("127.0.0.1:0").expect("bind mcp server"));
+    let ext_server = Arc::new(Server::http("127.0.0.1:0").expect("bind ext server"));
+    let mcp_port = bind_port(&mcp_server);
+    let ext_port = bind_port(&ext_server);
+    eprintln!("[cdp-agent] MCP http port {mcp_port} (tunnel 公開)  /ping /mcp");
+    eprintln!("[cdp-agent] ext http port {ext_port} (localhost 専用)  /ext/poll /ext/result");
+
+    {
+        let b = Arc::clone(&bridge);
+        let s = Arc::clone(&mcp_server);
+        thread::spawn(move || serve(s, b, server::handle_mcp));
+    }
+    let ext_thread = {
+        let b = Arc::clone(&bridge);
+        let s = Arc::clone(&ext_server);
+        thread::spawn(move || serve(s, b, server::handle_ext))
+    };
 
     // CDP_AGENT_ECHO_ONLY=1: cloudflared を spawn せず HTTP server だけ回す。
     if std::env::var("CDP_AGENT_ECHO_ONLY").is_ok() {
-        println!("ECHO_PORT={port}");
-        let _ = serve_thread.join();
+        println!("ECHO_PORT={mcp_port}");
+        println!("EXT_PORT={ext_port}");
+        let _ = ext_thread.join();
         return;
     }
 
     // 起動時 self-update を背景で実行 (#12 M6)。dev ビルドや最新時は no-op。
-    // CDP_AGENT_NO_SELFUPDATE を立てると無効化。差し替えは次回起動で反映される。
     if std::env::var("CDP_AGENT_NO_SELFUPDATE").is_err() {
         thread::spawn(|| match update::check_and_self_update() {
             Ok(Some(tag)) => {
@@ -107,7 +133,7 @@ fn main() {
         .args([
             "tunnel",
             "--url",
-            &format!("http://localhost:{port}"),
+            &format!("http://localhost:{mcp_port}"),
             "--no-autoupdate",
         ])
         .stdout(Stdio::piped())
@@ -135,8 +161,8 @@ fn main() {
                     found = true;
                     println!(
                         "\n=== QUICK TUNNEL URL ===\n{u}\n\
-                         CCoW で到達確認:  cargo run -p cdp-prober -- {u}\n\
                          MCP として使う:   {u}/mcp\n\
+                         拡張の接続先:     http://127.0.0.1:{ext_port} (localhost、tunnel しない)\n\
                          ========================\n"
                     );
                 }
