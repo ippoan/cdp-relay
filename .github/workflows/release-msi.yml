@@ -77,17 +77,18 @@ jobs:
           --output target/wix/cdp-agent-${{ steps.ver.outputs.version }}-x86_64.msi
 
       - name: Package extension zip (self-update 用)
-        shell: bash
+        # windows-latest に zip コマンドが無いので PowerShell の Compress-Archive を使う。
+        # asset 名 prefix は update.rs の pick_latest_extension が探す cdp-relay-extension- に揃える。
+        shell: pwsh
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          set -euo pipefail
-          # stamp 済みの target/release/extension を zip 化。asset 名 prefix は
-          # update.rs の pick_latest_extension が探す cdp-relay-extension- に揃える。
-          ZIP="cdp-relay-extension-${TAG}.zip"
-          (cd target/release/extension && zip -r "../../../${ZIP}" . -x '.ext-version')
-          sha256sum "${ZIP}" | awk '{print $1}' > "${ZIP}.sha256"
-          ls -la "${ZIP}"
+          $zip = "cdp-relay-extension-$env:TAG.zip"
+          # target/release/extension の中身を flat に固める (chrome unpacked 読込用)。
+          Compress-Archive -Path "target/release/extension/*" -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash" | Out-File -Encoding ascii "$zip.sha256"
+          Get-Item $zip
 
       - name: Upload MSI + extension zip to release
         uses: softprops/action-gh-release@v2
