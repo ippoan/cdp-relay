@@ -135,12 +135,22 @@ fn main() {
 
     // 起動時 self-update を背景で実行 (#12 M6)。dev ビルドや最新時は no-op。
     if std::env::var("CDP_AGENT_NO_SELFUPDATE").is_err() {
-        thread::spawn(|| match update::check_and_self_update() {
-            Ok(Some(tag)) => {
-                eprintln!("[cdp-agent] self-update: {tag} を取得。次回起動で反映されます")
+        thread::spawn(|| {
+            match update::check_and_self_update() {
+                Ok(Some(tag)) => {
+                    eprintln!("[cdp-agent] self-update: {tag} を取得。次回起動で反映されます")
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("[cdp-agent] self-update skip: {e}"),
             }
-            Ok(None) => {}
-            Err(e) => eprintln!("[cdp-agent] self-update skip: {e}"),
+            // 同梱拡張 (unpacked) も最新に更新する。Chrome 起動/再起動で反映。
+            match update::update_extension() {
+                Ok(Some(tag)) => {
+                    eprintln!("[cdp-agent] 拡張を更新: {tag} (Chrome 再起動で反映)")
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("[cdp-agent] 拡張更新 skip: {e}"),
+            }
         });
     }
 
