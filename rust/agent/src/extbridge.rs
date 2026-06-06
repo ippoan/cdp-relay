@@ -40,6 +40,8 @@ pub struct ExtBridge {
     /// quick tunnel の MCP URL (cloudflared が出たら main が set)。拡張の /ext/info が
     /// これを返し、popup が「接続用プロンプト」に埋め込む。
     mcp_url: Mutex<Option<String>>,
+    /// 拡張が最後に `/ext/poll` した時刻。/health で「拡張が繋がっているか」を出す用。
+    last_poll: Mutex<Option<std::time::Instant>>,
 }
 
 impl Default for ExtBridge {
@@ -57,7 +59,16 @@ impl ExtBridge {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             mcp_url: Mutex::new(None),
+            last_poll: Mutex::new(None),
         }
+    }
+
+    /// 拡張が最後に poll してから経過した秒数 (一度も無ければ None)。
+    pub fn secs_since_last_poll(&self) -> Option<u64> {
+        self.last_poll
+            .lock()
+            .unwrap()
+            .map(|t| t.elapsed().as_secs())
     }
 
     /// quick tunnel の MCP URL を記録する (main が cloudflared URL 取得時に呼ぶ)。
@@ -72,6 +83,7 @@ impl ExtBridge {
 
     /// 拡張が `/ext/poll` で 1 コマンドを引き取る。最大 `timeout` 待って無ければ None。
     pub fn poll(&self, timeout: Duration) -> Option<Command> {
+        *self.last_poll.lock().unwrap() = Some(std::time::Instant::now());
         let rx = self.cmd_rx.lock().unwrap();
         rx.recv_timeout(timeout).ok()
     }
@@ -90,26 +102,28 @@ impl ExtBridge {
             .get("id")
             .and_then(Value::as_u64)
             .ok_or("id (u64) required")?;
-        if let Some(err) = v.get("error") {
-            if !err.is_null() {
-                let msg = err
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| err.to_string());
-                self.result(id, Err(msg));
-                return Ok(());
-            }
-        }
-        let result = v.get("result").cloned().unwrap_or(Value::Null);
-        self.result(id, Ok(result));
+        // early return を避けて match で 1 本にまとめる (llvm-cov の閉じ括弧 artifact 回避)。
+        let res = match v.get("error") {
+            Some(err) if !err.is_null() => Err(err
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| err.to_string())),
+            _ => Ok(v.get("result").cloned().unwrap_or(Value::Null)),
+        };
+        self.result(id, res);
         Ok(())
     }
 }
 
-impl CommandSink for ExtBridge {
-    /// コマンドを積んで拡張の結果を待つ。拡張未接続 (poll されない) なら CMD_TIMEOUT で
-    /// `extension_not_connected` 相当のタイムアウト。
-    fn send(&self, method: &str, params: Value) -> Result<Value, String> {
+impl ExtBridge {
+    /// `send` の本体。timeout を注入できるようにして、未接続タイムアウト経路を CMD_TIMEOUT
+    /// (30s) 待たずに test できるようにしている (本番は CMD_TIMEOUT、test は短い値)。
+    fn send_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = channel();
         self.pending.lock().unwrap().insert(id, tx);
@@ -120,13 +134,21 @@ impl CommandSink for ExtBridge {
                 params,
             })
             .map_err(|_| "bridge closed".to_string())?;
-        match rx.recv_timeout(CMD_TIMEOUT) {
+        match rx.recv_timeout(timeout) {
             Ok(r) => r,
             Err(_) => {
                 self.pending.lock().unwrap().remove(&id);
                 Err("cdp_timeout (extension not connected?)".to_string())
             }
         }
+    }
+}
+
+impl CommandSink for ExtBridge {
+    /// コマンドを積んで拡張の結果を待つ。拡張未接続 (poll されない) なら CMD_TIMEOUT で
+    /// `extension_not_connected` 相当のタイムアウト。
+    fn send(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.send_with_timeout(method, params, CMD_TIMEOUT)
     }
 }
 
@@ -202,5 +224,30 @@ mod tests {
         assert_eq!(v["id"], 7);
         assert_eq!(v["method"], "navigate");
         assert_eq!(v["params"]["url"], "https://x/");
+    }
+
+    #[test]
+    fn default_constructs_empty() {
+        let b = ExtBridge::default();
+        assert!(b.mcp_url().is_none());
+        assert!(b.secs_since_last_poll().is_none());
+    }
+
+    #[test]
+    fn send_times_out_when_not_polled() {
+        // 誰も poll しない → 短 timeout で cdp_timeout (CMD_TIMEOUT 待たない)。
+        let bridge = ExtBridge::new();
+        let err = bridge
+            .send_with_timeout("navigate", json!({}), Duration::from_millis(10))
+            .unwrap_err();
+        assert!(err.contains("cdp_timeout"));
+    }
+
+    #[test]
+    fn poll_updates_last_poll() {
+        let bridge = ExtBridge::new();
+        assert!(bridge.secs_since_last_poll().is_none());
+        let _ = bridge.poll(Duration::from_millis(1));
+        assert!(bridge.secs_since_last_poll().is_some());
     }
 }

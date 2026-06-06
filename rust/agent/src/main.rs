@@ -12,6 +12,8 @@
 //! `CLOUDFLARED_BIN` で path 上書き、`CDP_AGENT_ECHO_ONLY=1` で tunnel を張らず HTTP
 //! server だけ起動する。
 
+#[macro_use]
+mod logbuf;
 mod extbridge;
 mod mcp;
 mod nmhost;
@@ -109,7 +111,7 @@ fn main() {
         match nmhost::install_native_host() {
             Ok(msg) => println!("{msg}"),
             Err(e) => {
-                eprintln!("[cdp-agent] native-host 登録失敗: {e}");
+                alog!("[cdp-agent] native-host 登録失敗: {e}");
                 std::process::exit(1);
             }
         }
@@ -122,7 +124,7 @@ fn main() {
         match std::env::current_exe() {
             Ok(exe) => println!("{}", nmhost::native_host_manifest_json(&exe)),
             Err(e) => {
-                eprintln!("[cdp-agent] current_exe 取得失敗: {e}");
+                alog!("[cdp-agent] current_exe 取得失敗: {e}");
                 std::process::exit(1);
             }
         }
@@ -162,15 +164,15 @@ fn main() {
     {
         match update::check_and_self_update() {
             Ok(Some(tag)) => {
-                eprintln!("[cdp-agent] self-update: {tag} を取得 → 新版で再起動します");
+                alog!("[cdp-agent] self-update: {tag} を取得 → 新版で再起動します");
                 let _ = update::update_extension();
                 match restart_into_new_binary() {
                     Ok(()) => return, // 現プロセス終了、新版 exe が引き継ぐ
-                    Err(e) => eprintln!("[cdp-agent] 再起動 spawn 失敗、現版で続行: {e}"),
+                    Err(e) => alog!("[cdp-agent] 再起動 spawn 失敗、現版で続行: {e}"),
                 }
             }
             Ok(None) => {}
-            Err(e) => eprintln!("[cdp-agent] self-update skip: {e}"),
+            Err(e) => alog!("[cdp-agent] self-update skip: {e}"),
         }
     }
 
@@ -192,15 +194,15 @@ fn main() {
     );
     let mcp_port = bind_port(&mcp_server);
     let ext_port = bind_port(&ext_server);
-    eprintln!("[cdp-agent] MCP http port {mcp_port} (tunnel 公開)  /ping /mcp");
-    eprintln!("[cdp-agent] ext http port {ext_port} (localhost 専用)  /ext/poll /ext/result");
+    alog!("[cdp-agent] MCP http port {mcp_port} (tunnel 公開)  /ping /mcp");
+    alog!("[cdp-agent] ext http port {ext_port} (localhost 専用)  /ext/poll /ext/result");
 
     // Native Messaging host を idempotent に自己登録する (#33)。これで一度通常起動すれば、
     // 次回以降は拡張が Native Messaging で agent を自動起動できる (Windows のみ実体)。
     if std::env::var("CDP_AGENT_NO_NM_REGISTER").is_err() {
         match nmhost::install_native_host() {
-            Ok(msg) => eprintln!("[cdp-agent] {msg}"),
-            Err(e) => eprintln!("[cdp-agent] native-host 自己登録 skip: {e}"),
+            Ok(msg) => alog!("[cdp-agent] {msg}"),
+            Err(e) => alog!("[cdp-agent] native-host 自己登録 skip: {e}"),
         }
     }
 
@@ -227,9 +229,9 @@ fn main() {
     // (binary が最新でも同梱拡張が古いケースの保険。Chrome 再読込で反映)。
     if std::env::var("CDP_AGENT_NO_SELFUPDATE").is_err() {
         thread::spawn(|| match update::update_extension() {
-            Ok(Some(tag)) => eprintln!("[cdp-agent] 拡張を更新: {tag} (Chrome 再読込で反映)"),
+            Ok(Some(tag)) => alog!("[cdp-agent] 拡張を更新: {tag} (Chrome 再読込で反映)"),
             Ok(None) => {}
-            Err(e) => eprintln!("[cdp-agent] 拡張更新 skip: {e}"),
+            Err(e) => alog!("[cdp-agent] 拡張更新 skip: {e}"),
         });
     }
 
@@ -271,7 +273,7 @@ fn main() {
     let url_thread = thread::spawn(move || {
         let mut found = false;
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            eprintln!("[cloudflared] {line}");
+            alog!("[cloudflared] {line}");
             if !found {
                 if let Some(u) = extract_url(&line) {
                     found = true;
@@ -294,9 +296,9 @@ fn main() {
                             .unwrap_or_else(|_| "https://cdp-relay.ippoan.org".into());
                         match register::register_tunnel(&rdv, &session, &token, &u) {
                             Ok(()) => {
-                                eprintln!("[cdp-agent] rendezvous 登録: {rdv} session={session}")
+                                alog!("[cdp-agent] rendezvous 登録: {rdv} session={session}")
                             }
-                            Err(e) => eprintln!("[cdp-agent] rendezvous 登録失敗: {e}"),
+                            Err(e) => alog!("[cdp-agent] rendezvous 登録失敗: {e}"),
                         }
                     }
                 }
@@ -307,7 +309,7 @@ fn main() {
     if let Some(out) = child.stdout.take() {
         thread::spawn(move || {
             for l in BufReader::new(out).lines().map_while(Result::ok) {
-                eprintln!("[cloudflared:out] {l}");
+                alog!("[cloudflared:out] {l}");
             }
         });
     }
