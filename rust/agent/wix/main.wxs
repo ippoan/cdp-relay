@@ -71,6 +71,11 @@
           Name='cdp-agent.exe'
           DiskId='1'
           Source='$(var.CargoTargetBinDir)\cdp-agent.exe' />
+        <!-- user-profile 配下の dir は uninstall 時の削除エントリが必須 (ICE64)。
+             APPLICATIONFOLDER (=cdp-relay-agent) と親 ProgramsFolder を片付ける
+             (空なら削除)。ExtensionFolder は ExtensionComp 側で removal 済み。 -->
+        <RemoveFolder Id='RemoveApplicationFolder' On='uninstall' />
+        <RemoveFolder Id='RemoveProgramsFolder' Directory='ProgramsFolder' On='uninstall' />
         <RegistryValue Root='HKCU' Key='Software\ippoan\cdp-agent'
           Name='exe' Type='integer' Value='1' KeyPath='yes' />
       </Component>
