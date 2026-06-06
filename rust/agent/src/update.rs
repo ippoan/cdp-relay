@@ -188,6 +188,112 @@ fn download_and_replace(agent: &ureq::Agent, url: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ─── 拡張 (unpacked) の自動更新 ─────────────────────────────────────────────
+//
+// unpacked 拡張は Chrome が自動更新しない。そこで agent が GitHub の最新拡張 zip を
+// install dir の extension\ に上書きし、Chrome 起動/再起動時に新版を読ませる
+// (= 実質自動更新)。即時反映は別途 (拡張へ reload 通知) で拡張できる。
+
+/// 拡張 zip asset の名前 prefix (release.yml が `cdp-relay-extension-v*.zip` で出す)。
+const EXT_ASSET_PREFIX: &str = "cdp-relay-extension-";
+
+/// releases から最新の拡張 zip asset を選ぶ (releases は新しい順なので最初の一致)。
+pub fn pick_latest_extension(releases: &Value) -> Option<(String, String)> {
+    for rel in releases.as_array()? {
+        let tag = rel
+            .get("tag_name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let assets = match rel.get("assets").and_then(Value::as_array) {
+            Some(a) => a,
+            None => continue,
+        };
+        for a in assets {
+            let name = a.get("name").and_then(Value::as_str).unwrap_or("");
+            if name.starts_with(EXT_ASSET_PREFIX) && name.ends_with(".zip") {
+                if let Some(url) = a.get("browser_download_url").and_then(Value::as_str) {
+                    return Some((tag, url.to_string()));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// install dir の extension\ を最新拡張 zip で更新する。前回 tag は .ext-version に記録。
+/// extension\ が無い (dev / 手動 exe) なら何もしない。
+pub fn update_extension() -> Result<Option<String>, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let ext_dir = exe
+        .parent()
+        .ok_or_else(|| "exe parent 不明".to_string())?
+        .join("extension");
+    if !ext_dir.is_dir() {
+        return Ok(None); // MSI 同梱拡張が無い
+    }
+    let marker = ext_dir.join(".ext-version");
+    let current = std::fs::read_to_string(&marker).unwrap_or_default();
+    let current = current.trim();
+
+    let agent = build_agent();
+    let body = agent
+        .get(RELEASES_API)
+        .set("User-Agent", "cdp-agent-self-update")
+        .set("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| format!("releases 取得失敗: {e}"))?
+        .into_string()
+        .map_err(|e| e.to_string())?;
+    let releases: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+
+    let Some((tag, url)) = pick_latest_extension(&releases) else {
+        return Ok(None);
+    };
+    if !current.is_empty() && tag == current {
+        return Ok(None); // 最新
+    }
+    download_extension(&agent, &url, &ext_dir)?;
+    let _ = std::fs::write(&marker, &tag);
+    Ok(Some(tag))
+}
+
+/// 拡張 zip を DL して ext_dir に展開する (flat 構成のみ、path traversal は弾く)。
+fn download_extension(
+    agent: &ureq::Agent,
+    url: &str,
+    ext_dir: &std::path::Path,
+) -> Result<(), String> {
+    validate_asset_url(url)?;
+    let resp = agent
+        .get(url)
+        .set("User-Agent", "cdp-agent-self-update")
+        .call()
+        .map_err(|e| format!("ext asset DL 失敗: {e}"))?;
+    let mut bytes: Vec<u8> = Vec::new();
+    resp.into_reader()
+        .take(MAX_ASSET_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_ASSET_BYTES {
+        return Err("ext asset が上限サイズを超過".into());
+    }
+    let mut zip =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("ext zip: {e}"))?;
+    for i in 0..zip.len() {
+        let entry = zip.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        // 拡張は flat (manifest.json 等)。サブディレクトリ / traversal は弾く。
+        if name.is_empty() || name.contains("..") || name.contains('/') || name.contains('\\') {
+            continue;
+        }
+        let out_path = ext_dir.join(&name);
+        let mut out = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry.take(MAX_ASSET_BYTES + 1), &mut out).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +392,36 @@ mod tests {
         assert!(validate_asset_url("https://evil.example.com/x.zip").is_err());
         assert!(validate_asset_url("http://github.com/x.zip").is_err());
         assert!(validate_asset_url("not-a-url").is_err());
+    }
+
+    #[test]
+    fn pick_latest_extension_finds_first_extension_zip() {
+        let releases = json!([
+            // 新しい順。最初に拡張 zip を持つ release を採用。
+            { "tag_name": "cdp-agent-dev-9", "assets": [
+                { "name": "cdp-agent-0.0.9-x86_64.msi", "browser_download_url": "u-msi" }
+            ]},
+            { "tag_name": "v0.1.2-dev", "assets": [
+                { "name": "cdp-relay-extension-v0.1.2-dev.zip", "browser_download_url": "u-ext2" },
+                { "name": "cdp-relay-extension-v0.1.2-dev.zip.sha256", "browser_download_url": "u-sha" }
+            ]},
+            { "tag_name": "v0.1.1-dev", "assets": [
+                { "name": "cdp-relay-extension-v0.1.1-dev.zip", "browser_download_url": "u-ext1" }
+            ]},
+        ]);
+        let (tag, url) = pick_latest_extension(&releases).unwrap();
+        assert_eq!(tag, "v0.1.2-dev");
+        assert_eq!(url, "u-ext2");
+    }
+
+    #[test]
+    fn pick_latest_extension_none_when_no_extension_asset() {
+        let releases = json!([
+            { "tag_name": "cdp-agent-dev-9", "assets": [
+                { "name": "cdp-agent-0.0.9-x86_64.msi", "browser_download_url": "u" }
+            ]}
+        ]);
+        assert!(pick_latest_extension(&releases).is_none());
     }
 
     #[test]
