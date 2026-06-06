@@ -3,6 +3,9 @@
 const $ = (id) => document.getElementById(id);
 
 async function restore() {
+  // 現在の拡張バージョンを表示 (manifest.json の version)。
+  $("ver").textContent = "v" + chrome.runtime.getManifest().version;
+
   const c = await chrome.storage.local.get(["relayUrl", "session", "token", "tabId"]);
   // 未設定なら手元 agent (固定 ext port 19222) を既定で埋める。
   $("relayUrl").value = c.relayUrl || "http://127.0.0.1:19222";
@@ -52,6 +55,14 @@ $("connect").addEventListener("click", async () => {
 $("disconnect").addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "cdp-relay-disconnect" }).catch(() => {});
   setStatus("切断しました");
+});
+
+// 更新ボタン: 拡張を再読込してディスク上の最新ファイル (agent が更新したもの) を反映。
+// unpacked 拡張は reload でディスクから再読込される。接続は切れるので再接続が必要。
+$("reload").addEventListener("click", () => {
+  if (confirm("拡張を再読込します（接続は切れます）。agent が更新した最新ファイルが反映されます。")) {
+    chrome.runtime.reload();
+  }
 });
 
 // background からの状態通知。

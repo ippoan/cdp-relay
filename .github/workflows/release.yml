@@ -44,6 +44,17 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Computed dev tag: ${TAG}"
 
+      - name: Stamp manifest version from tag
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # v0.1.5-dev -> 0.1.5 (manifest version は数値.数値.数値)
+          VER="${TAG#v}"; VER="${VER%-dev}"
+          VER="$VER" node -e "const fs=require('fs');const p='extension/manifest.json';const m=JSON.parse(fs.readFileSync(p));m.version=process.env.VER;fs.writeFileSync(p,JSON.stringify(m,null,2)+'\n')"
+          echo "manifest version -> ${VER}"
+
       - name: Package extension/ as zip
         id: pkg
         env:
