@@ -293,4 +293,38 @@ mod tests {
         let v = parse(r.body.as_deref().unwrap());
         assert_eq!(v["error"]["code"], -32700);
     }
+
+    #[test]
+    fn ping_returns_empty_result() {
+        let r = handle(r#"{"jsonrpc":"2.0","id":9,"method":"ping"}"#, &ok_sink());
+        assert!(r.session_id.is_none());
+        let v = parse(r.body.as_deref().unwrap());
+        assert_eq!(v["id"], 9);
+        assert!(v["result"].is_object());
+    }
+
+    #[test]
+    fn tools_call_without_arguments_defaults_to_empty() {
+        // params.arguments を省略 → args は json!({}) に fallback (unwrap_or_else 経路)。
+        let r = handle(
+            r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"browser_screenshot"}}"#,
+            &ok_sink(),
+        );
+        let v = parse(r.body.as_deref().unwrap());
+        assert_eq!(v["result"]["content"][0]["type"], "image");
+    }
+
+    #[test]
+    fn screenshot_error_propagates_as_jsonrpc_error() {
+        let r = handle(
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"browser_screenshot","arguments":{}}}"#,
+            &FakeSink(Err("debugger detached".into())),
+        );
+        let v = parse(r.body.as_deref().unwrap());
+        assert_eq!(v["error"]["code"], -32000);
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("debugger detached"));
+    }
 }

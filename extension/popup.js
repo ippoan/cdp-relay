@@ -15,6 +15,18 @@ function renderVer() {
   $("ver").textContent = "ext v" + extVer + (agentVer ? "  ·  agent " + agentVer : "");
 }
 
+/** Relay URL が localhost (= agent mode) か。background.js と同判定。 */
+function isAgentUrl(relayUrl) {
+  return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test((relayUrl || "").trim());
+}
+
+/** agent mode では session / token は不要なので隠す (WS mode のみ表示)。 */
+function toggleModeFields() {
+  const agent = isAgentUrl($("relayUrl").value);
+  $("sessionRow").style.display = agent ? "none" : "";
+  $("tokenRow").style.display = agent ? "none" : "";
+}
+
 async function restore() {
   // 現在の拡張バージョンを表示 (manifest.json の version)。agent version は後で併記。
   extVer = chrome.runtime.getManifest().version;
@@ -41,6 +53,9 @@ async function restore() {
   const active = tabs.find((t) => t.active);
   if (active && active.url) activeTabUrl = active.url;
   if (c.tabId == null && active) sel.value = String(active.id);
+
+  // agent / WS mode に応じて session/token の表示を切り替える。
+  toggleModeFields();
 
   // MCP URL を先読みしておく (クリック時は await を挟まず同期コピーできるように)。
   refreshMcpUrl();
@@ -116,6 +131,11 @@ function copyTextSync(text) {
   }
   return ok;
 }
+
+// Relay URL を変えたら mode 表示を更新し、MCP URL も取り直す。
+$("relayUrl").addEventListener("input", () => {
+  toggleModeFields();
+});
 
 $("connect").addEventListener("click", async () => {
   await save();
