@@ -127,6 +127,13 @@ function toHttpsBase(relayUrl) {
 
 /** 対象タブに debugger attach する (共通)。 */
 async function attach(tabId) {
+  // 自動再接続 (SW idle 死からの復帰) で前回の attach が残っていることがあるので、
+  // 念のため一度 detach してから attach する (未 attach なら detach は無害に失敗)。
+  try {
+    await chrome.debugger.detach({ tabId });
+  } catch {
+    /* not attached */
+  }
   await chrome.debugger.attach({ tabId }, "1.3");
   await chrome.debugger.sendCommand({ tabId }, "Page.enable");
   attachedTabId = tabId;
@@ -167,6 +174,10 @@ async function connect() {
       return;
     }
     agentRunning = true;
+    // 接続意図を永続化 + keepalive alarm。MV3 SW が idle で落ちても alarm が SW を
+    // 起こし、onAlarm が agentRunning=false を見て自動再接続する (cdp-relay#33)。
+    await chrome.storage.local.set({ autoConnect: true });
+    chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 }); // ~24s
     reportStatus("connected", `agent mode tab=${cfg.tabId}`);
     agentLoop(cfg); // 非 await: 背景で回す
     return;
@@ -358,24 +369,37 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true; // async response
   }
   if (msg && msg.type === "cdp-relay-disconnect") {
+    // 明示切断: 自動再接続の意図もクリアする。
+    chrome.storage.local.set({ autoConnect: false });
     disconnect().then(() => sendResponse({ ok: true }));
     return true;
   }
   return false;
 });
 
-// keepalive: WS が開いていれば ping を打って SW を生かす (agent モードは long-poll fetch が生かす)。
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === KEEPALIVE_ALARM && ws && ws.readyState === WebSocket.OPEN) {
+// keepalive: alarm で SW を周期的に起こす。
+//  - WS モード: ping で接続を生かす。
+//  - agent モード: SW idle 死で loop が止まっていたら (agentRunning=false)、接続意図が
+//    残っていれば自動再接続する。これで放置後も接続が切れない (cdp-relay#33)。
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== KEEPALIVE_ALARM) return;
+  if (ws && ws.readyState === WebSocket.OPEN) {
     try {
       ws.send("ping");
     } catch {
       /* noop */
     }
+    return;
   }
+  if (agentRunning) return; // agent loop は生きている
+  const { autoConnect } = await chrome.storage.local.get("autoConnect");
+  if (autoConnect) connect().catch(() => {});
 });
 
-// 対象タブが閉じたら片付ける。
+// 対象タブが閉じたら片付ける + 自動再接続も止める (タブが無いので繋ぎ直せない)。
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (tabId === attachedTabId) disconnect();
+  if (tabId === attachedTabId) {
+    chrome.storage.local.set({ autoConnect: false });
+    disconnect();
+  }
 });
