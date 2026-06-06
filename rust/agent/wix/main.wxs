@@ -1,0 +1,80 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!--
+  cdp-agent の WiX 定義 (cdp-relay#12 M6b)。cargo-wix (WiX v3 toolset) でビルドする。
+  rust-nfc-bridge の wix/main.wxs を雛形に、Windows Service 登録を外し、cloudflared.exe を
+  同梱した。Source は cargo-wix が提供する $(var.CargoTargetBinDir) を使う (workspace でも
+  target\release を正しく指す)。cloudflared.exe は CI が同 dir に配置してから wix を回す。
+
+  自動更新は agent 内蔵 self-update (M6a) が担うので、MSI は初回 install + cloudflared 同梱に
+  徹する。MajorUpgrade で手動再 install 時の上書きは効く。
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+  <?define Manufacturer = 'ippoan' ?>
+  <?define ProductName = 'cdp-relay agent' ?>
+  <?define UpgradeCode = 'C5449CFB-A7ED-4D46-AB31-2C5D13351FAC' ?>
+
+  <Product
+    Id='*'
+    Name='$(var.ProductName)'
+    UpgradeCode='$(var.UpgradeCode)'
+    Manufacturer='$(var.Manufacturer)'
+    Language='1033'
+    Codepage='1252'
+    Version='$(var.Version)'>
+
+    <Package
+      InstallerVersion='450'
+      Compressed='yes'
+      InstallScope='perMachine'
+      Description='cdp-relay agent — 手元 Chrome を CCoW から CDP 操作するための quick tunnel agent'
+      Manufacturer='$(var.Manufacturer)' />
+
+    <MajorUpgrade
+      Schedule='afterInstallInitialize'
+      DowngradeErrorMessage='A newer version of [ProductName] is already installed.' />
+
+    <MediaTemplate EmbedCab='yes' />
+
+    <Directory Id='TARGETDIR' Name='SourceDir'>
+      <Directory Id='ProgramFiles64Folder' Name='PFiles'>
+        <Directory Id='APPLICATIONFOLDER' Name='cdp-relay-agent' />
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id='APPLICATIONFOLDER'>
+      <!-- agent 本体 -->
+      <Component Id='CdpAgentExeComp' Guid='4601455F-4C8C-43C6-BCA1-4A840029E559' Win64='yes'>
+        <File
+          Id='CdpAgentExe'
+          Name='cdp-agent.exe'
+          DiskId='1'
+          Source='$(var.CargoTargetBinDir)\cdp-agent.exe'
+          KeyPath='yes' />
+      </Component>
+
+      <!-- cloudflared.exe を同梱 (CI が CargoTargetBinDir に配置してから wix を回す) -->
+      <Component Id='CloudflaredExeComp' Guid='D29D3727-E3F2-4D41-8D37-18A5DF48D762' Win64='yes'>
+        <File
+          Id='CloudflaredExe'
+          Name='cloudflared.exe'
+          DiskId='1'
+          Source='$(var.CargoTargetBinDir)\cloudflared.exe'
+          KeyPath='yes' />
+      </Component>
+    </DirectoryRef>
+
+    <Feature
+      Id='MainFeature'
+      Title='cdp-relay agent'
+      Description='cdp-agent と同梱 cloudflared'
+      Level='1'
+      ConfigurableDirectory='APPLICATIONFOLDER'
+      AllowAdvertise='no'
+      Display='expand'
+      Absent='disallow'>
+      <ComponentRef Id='CdpAgentExeComp' />
+      <ComponentRef Id='CloudflaredExeComp' />
+    </Feature>
+  </Product>
+</Wix>

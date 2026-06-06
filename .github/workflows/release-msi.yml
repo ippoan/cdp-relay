@@ -1,0 +1,68 @@
+name: Release MSI
+
+# cdp-agent の Windows MSI (cargo-wix) を作って Release に添付する (cdp-relay#12 M6b)。
+# tag は release-rust.yml と同じ cdp-agent-* を受け、同 tag の Release に asset を足す。
+# cloudflared.exe を同梱する。自動更新は agent 内蔵 self-update (M6a) が担う。
+#
+# NOTE: MSI ビルドは CCoW で検証できず windows-latest + WiX toolset 依存。cargo-wix の
+# フラグ (--install-version / --output 等) や CargoTargetBinDir 解決は初回 CI で要調整。
+
+on:
+  push:
+    tags:
+      - 'cdp-agent-v*'
+      - 'cdp-agent-dev-*'
+
+permissions:
+  contents: write
+
+jobs:
+  msi:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build cdp-agent (release)
+        env:
+          CDP_AGENT_RELEASE_TAG: ${{ github.ref_name }}
+        run: cargo build --release --locked -p cdp-agent
+
+      - name: Bundle cloudflared.exe (CargoTargetBinDir に配置)
+        shell: bash
+        run: |
+          curl -sSL -o target/release/cloudflared.exe \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
+
+      - name: Compute MSI version (dev-N -> 0.0.N)
+        id: ver
+        shell: bash
+        run: |
+          tag="${{ github.ref_name }}"
+          if [[ "$tag" =~ ^cdp-agent-dev-([0-9]+)$ ]]; then
+            echo "version=0.0.${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          elif [[ "$tag" =~ ^cdp-agent-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix
+
+      - name: Build MSI (no rebuild, reuse target/release)
+        run: >
+          cargo wix --package cdp-agent --no-build --nocapture
+          --install-version ${{ steps.ver.outputs.version }}
+          --output target/wix/cdp-agent-${{ github.ref_name }}-x86_64.msi
+
+      - name: Upload MSI to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: rust/target/wix/*.msi
+          fail_on_unmatched_files: true
