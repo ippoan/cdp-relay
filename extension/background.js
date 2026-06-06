@@ -20,6 +20,9 @@
 let ws = null;
 let attachedTabId = null;
 let agentRunning = false;
+// 接続処理中フラグ。SW 起動直後の自動再接続 (top-level) と onAlarm / popup が
+// 同時に connect() を呼んでも二重接続しないように guard する。
+let connecting = false;
 const KEEPALIVE_ALARM = "cdp-relay-keepalive";
 
 /** Native Messaging host 名 (agent の --install-native-host が登録する manifest と一致)。 */
@@ -140,6 +143,17 @@ async function attach(tabId) {
 }
 
 async function connect() {
+  // 二重接続 guard (top-level 自動再接続 / onAlarm / popup の同時呼びを束ねる)。
+  if (connecting) return;
+  connecting = true;
+  try {
+    await connectInner();
+  } finally {
+    connecting = false;
+  }
+}
+
+async function connectInner() {
   const cfg = await loadConfig();
   if (!cfg.relayUrl) {
     reportStatus("error", "Relay URL が未設定");
@@ -403,3 +417,30 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     disconnect();
   }
 });
+
+/**
+ * SW 起動時に接続意図 (autoConnect) が残っていれば再接続する。
+ *
+ * 「更新（拡張を再読込）」ボタンは chrome.runtime.reload() で service worker を
+ * 作り直すだけで、接続 (ws / agentLoop) も keepalive alarm も復元しない。
+ * chrome.runtime.reload() は onInstalled / onStartup を発火させないため、SW が
+ * 再評価される度に必ず走る top-level でのみ確実に再接続できる。これが無いと
+ * 更新ボタン押下後に再接続されず「更新ボタンが動かない」症状になる (cdp-relay#33)。
+ */
+async function autoReconnectOnBoot() {
+  try {
+    const { autoConnect } = await chrome.storage.local.get("autoConnect");
+    if (autoConnect) await connect();
+  } catch {
+    /* storage 読めない等は無視 (popup の「接続」で手動復帰できる) */
+  }
+}
+
+// browser / profile 起動時にも alarm 待ちにせず即再接続する。
+chrome.runtime.onStartup.addListener(() => {
+  autoReconnectOnBoot();
+});
+
+// SW が起動するたび (更新ボタンの reload / idle 復帰 / install / 更新) に走る。
+// connect() の二重接続 guard が onStartup / onAlarm との競合を吸収する。
+autoReconnectOnBoot();
