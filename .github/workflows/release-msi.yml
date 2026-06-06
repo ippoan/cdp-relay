@@ -38,13 +38,21 @@ jobs:
           curl -sSL -o target/release/cloudflared.exe \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
 
-      - name: Bundle MV3 extension (CargoTargetBinDir\extension に配置)
+      - name: Bundle MV3 extension (manifest stamp + CargoTargetBinDir\extension に配置)
         shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
           mkdir -p target/release/extension
           cp ../extension/manifest.json ../extension/background.js \
              ../extension/popup.html ../extension/popup.js \
              target/release/extension/
+          # cdp-agent-dev-14 -> 0.0.14 (agent version と揃える)。manifest version を
+          # stamp して popup の version 表示 / self-update 比較を機能させる。
+          N="${TAG##*-}"; VER="0.0.${N}"
+          VER="$VER" node -e "const fs=require('fs');const p='target/release/extension/manifest.json';const m=JSON.parse(fs.readFileSync(p));m.version=process.env.VER;fs.writeFileSync(p,JSON.stringify(m,null,2)+'\n')"
+          echo "extension manifest version -> ${VER}"
 
       - name: Compute MSI version (dev-N -> 0.0.N)
         id: ver
@@ -68,9 +76,25 @@ jobs:
           --install-version ${{ steps.ver.outputs.version }}
           --output target/wix/cdp-agent-${{ steps.ver.outputs.version }}-x86_64.msi
 
-      - name: Upload MSI to release
+      - name: Package extension zip (self-update 用)
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # stamp 済みの target/release/extension を zip 化。asset 名 prefix は
+          # update.rs の pick_latest_extension が探す cdp-relay-extension- に揃える。
+          ZIP="cdp-relay-extension-${TAG}.zip"
+          (cd target/release/extension && zip -r "../../../${ZIP}" . -x '.ext-version')
+          sha256sum "${ZIP}" | awk '{print $1}' > "${ZIP}.sha256"
+          ls -la "${ZIP}"
+
+      - name: Upload MSI + extension zip to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: rust/target/wix/*.msi
+          files: |
+            rust/target/wix/*.msi
+            rust/cdp-relay-extension-*.zip
+            rust/cdp-relay-extension-*.zip.sha256
           fail_on_unmatched_files: true
