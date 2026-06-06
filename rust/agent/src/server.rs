@@ -68,17 +68,16 @@ pub fn handle_mcp(method: &str, url: &str, body: &str, bridge: &ExtBridge) -> Ht
                 },
             }
         }
-        // health: version / 拡張接続状況 / 直近ログを返す。tunnel 公開なので remote
-        // (CCoW) からも curl <tunnel>/health で agent の状況を確認できる (#33)。
+        // health (tunnel 公開): liveness / version / 拡張接続状況 **だけ** を返す。
+        // logs や mcp_url のような運用情報・PII は無認証の tunnel 面には出さない
+        // (詳細は localhost 専用の /ext/health にある)。
         ("GET", "/health") => {
             let poll_age = bridge.secs_since_last_poll();
             let body = serde_json::json!({
                 "ok": true,
                 "version": crate::update::current_release_tag().unwrap_or("dev"),
-                "mcp_url": bridge.mcp_url().unwrap_or_default(),
                 "ext_last_poll_secs": poll_age,
                 "ext_connected": poll_age.map(|s| s < 30).unwrap_or(false),
-                "logs": crate::logbuf::snapshot(),
             });
             HttpReply::json(200, body.to_string())
         }
@@ -126,6 +125,20 @@ fn handle_ext_with_poll_timeout(
                 200,
                 serde_json::json!({ "mcp_url": mcp, "version": version }).to_string(),
             )
+        }
+        // 詳細 health (localhost 専用): version / mcp_url / 拡張接続状況 / 直近ログ。
+        // tunnel には出さない情報 (logs / mcp_url) はこちらに置く。
+        ("GET", "/ext/health") => {
+            let poll_age = bridge.secs_since_last_poll();
+            let body = serde_json::json!({
+                "ok": true,
+                "version": crate::update::current_release_tag().unwrap_or("dev"),
+                "mcp_url": bridge.mcp_url().unwrap_or_default(),
+                "ext_last_poll_secs": poll_age,
+                "ext_connected": poll_age.map(|s| s < 30).unwrap_or(false),
+                "logs": crate::logbuf::snapshot(),
+            });
+            HttpReply::json(200, body.to_string())
         }
         _ => HttpReply::text(404, "not found\n"),
     }
@@ -232,12 +245,28 @@ mod tests {
     }
 
     #[test]
-    fn health_returns_version_and_logs() {
+    fn public_health_has_version_but_no_logs_or_mcp_url() {
         let b = ExtBridge::new();
         b.set_mcp_url("https://x.trycloudflare.com/mcp".into());
         // poll を一度呼んで ext_connected=true 経路を通す。
         let _ = b.poll(Duration::from_millis(1));
         let r = handle_mcp("GET", "/health", "", &b);
+        assert_eq!(r.status, 200);
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["version"], "dev");
+        assert_eq!(v["ext_connected"], true);
+        // tunnel 公開なので logs / mcp_url は出さない。
+        assert!(v.get("logs").is_none());
+        assert!(v.get("mcp_url").is_none());
+    }
+
+    #[test]
+    fn ext_health_includes_logs_and_mcp_url() {
+        let b = ExtBridge::new();
+        b.set_mcp_url("https://x.trycloudflare.com/mcp".into());
+        let _ = b.poll(Duration::from_millis(1));
+        let r = handle_ext("GET", "/ext/health", "", &b);
         assert_eq!(r.status, 200);
         let v: Value = serde_json::from_slice(&r.body).unwrap();
         assert_eq!(v["ok"], true);
