@@ -27,7 +27,7 @@
       InstallerVersion='450'
       Compressed='yes'
       InstallScope='perMachine'
-      Description='cdp-relay agent — 手元 Chrome を CCoW から CDP 操作するための quick tunnel agent'
+      Description='cdp-relay agent - quick tunnel agent to drive local Chrome via CDP from CCoW'
       Manufacturer='$(var.Manufacturer)' />
 
     <MajorUpgrade
@@ -67,7 +67,7 @@
     <Feature
       Id='MainFeature'
       Title='cdp-relay agent'
-      Description='cdp-agent と同梱 cloudflared'
+      Description='cdp-agent and bundled cloudflared'
       Level='1'
       ConfigurableDirectory='APPLICATIONFOLDER'
       AllowAdvertise='no'
