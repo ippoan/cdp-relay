@@ -94,6 +94,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          # `-` を含む tag (cdp-agent-dev-N) は prerelease。release-rust.yml の
+          # Detect prerelease と挙動を揃える。揃えないと dev-* が非 prerelease で
+          # 作られ "Latest" を奪う (cdp-agent-dev-9 が Latest に居座る事象)。
+          # stable tag (cdp-agent-v*) は非 prerelease のまま → Latest になる。
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             rust/target/wix/*.msi
             rust/cdp-relay-extension-*.zip
