@@ -4,7 +4,8 @@ const $ = (id) => document.getElementById(id);
 
 async function restore() {
   const c = await chrome.storage.local.get(["relayUrl", "session", "token", "tabId"]);
-  if (c.relayUrl) $("relayUrl").value = c.relayUrl;
+  // 未設定なら手元 agent (固定 ext port 19222) を既定で埋める。
+  $("relayUrl").value = c.relayUrl || "http://127.0.0.1:19222";
   if (c.session) $("session").value = c.session;
   if (c.token) $("token").value = c.token;
 

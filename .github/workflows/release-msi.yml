@@ -38,6 +38,14 @@ jobs:
           curl -sSL -o target/release/cloudflared.exe \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
 
+      - name: Bundle MV3 extension (CargoTargetBinDir\extension に配置)
+        shell: bash
+        run: |
+          mkdir -p target/release/extension
+          cp ../extension/manifest.json ../extension/background.js \
+             ../extension/popup.html ../extension/popup.js \
+             target/release/extension/
+
       - name: Compute MSI version (dev-N -> 0.0.N)
         id: ver
         shell: bash
