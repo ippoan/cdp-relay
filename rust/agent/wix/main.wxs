@@ -38,7 +38,11 @@
 
     <Directory Id='TARGETDIR' Name='SourceDir'>
       <Directory Id='ProgramFiles64Folder' Name='PFiles'>
-        <Directory Id='APPLICATIONFOLDER' Name='cdp-relay-agent' />
+        <Directory Id='APPLICATIONFOLDER' Name='cdp-relay-agent'>
+          <!-- MV3 拡張を同梱する。chrome://extensions で「パッケージ化されていない
+               拡張機能を読み込む」で APPLICATIONFOLDER\extension を選べる。 -->
+          <Directory Id='ExtensionFolder' Name='extension' />
+        </Directory>
       </Directory>
       <!-- スタートメニュー (プログラム一覧) のショートカット用フォルダ -->
       <Directory Id='ProgramMenuFolder'>
@@ -65,6 +69,20 @@
           DiskId='1'
           Source='$(var.CargoTargetBinDir)\cloudflared.exe'
           KeyPath='yes' />
+      </Component>
+    </DirectoryRef>
+
+    <!-- 拡張ファイルを extension\ に同梱 (CI が CargoTargetBinDir\extension に配置) -->
+    <DirectoryRef Id='ExtensionFolder'>
+      <Component Id='ExtensionComp' Guid='31598723-9CD9-48A4-BE5E-5B00F7BAD850' Win64='yes'>
+        <File Id='ExtManifest' Name='manifest.json'
+          Source='$(var.CargoTargetBinDir)\extension\manifest.json' KeyPath='yes' />
+        <File Id='ExtBackground' Name='background.js'
+          Source='$(var.CargoTargetBinDir)\extension\background.js' />
+        <File Id='ExtPopupHtml' Name='popup.html'
+          Source='$(var.CargoTargetBinDir)\extension\popup.html' />
+        <File Id='ExtPopupJs' Name='popup.js'
+          Source='$(var.CargoTargetBinDir)\extension\popup.js' />
       </Component>
     </DirectoryRef>
 
@@ -101,6 +119,7 @@
       <ComponentRef Id='CdpAgentExeComp' />
       <ComponentRef Id='CloudflaredExeComp' />
       <ComponentRef Id='StartMenuShortcutComp' />
+      <ComponentRef Id='ExtensionComp' />
     </Feature>
   </Product>
 </Wix>

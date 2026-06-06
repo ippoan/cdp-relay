@@ -29,11 +29,11 @@ function isAgentUrl(relayUrl) {
   return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(relayUrl.trim());
 }
 
-/** popup / storage の設定を読む。 */
+/** popup / storage の設定を読む。Relay URL 未設定なら手元 agent (19222) に fallback。 */
 async function loadConfig() {
   const c = await chrome.storage.local.get(["relayUrl", "session", "token", "tabId"]);
   return {
-    relayUrl: c.relayUrl || "",
+    relayUrl: c.relayUrl || "http://127.0.0.1:19222",
     session: c.session || "",
     token: c.token || "",
     tabId: typeof c.tabId === "number" ? c.tabId : null,
