@@ -22,11 +22,74 @@ let attachedTabId = null;
 let agentRunning = false;
 const KEEPALIVE_ALARM = "cdp-relay-keepalive";
 
+/** Native Messaging host 名 (agent の --install-native-host が登録する manifest と一致)。 */
+const NATIVE_HOST = "com.ippoan.cdp_agent";
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Relay URL が localhost (= agent モード) か。 */
 function isAgentUrl(relayUrl) {
   return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(relayUrl.trim());
+}
+
+/** agent (ext server) に到達できるか。`/ext/info` を短 timeout で叩いて判定。 */
+async function pingAgent(base, timeoutMs = 1500) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${base}/ext/info`, { signal: ctrl.signal });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * Native Messaging で手元 cdp-agent を起動依頼する (cdp-relay#33)。
+ * host は agent を detached spawn して即応答する (ランチャー)。host 未登録なら
+ * lastError が立つので throw する (= 呼び出し側は手動起動を案内)。
+ */
+function startAgentViaNative() {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    try {
+      chrome.runtime.sendNativeMessage(NATIVE_HOST, { cmd: "start" }, (resp) => {
+        if (settled) return;
+        settled = true;
+        const err = chrome.runtime.lastError;
+        if (err) {
+          reject(new Error(err.message || "native messaging 失敗"));
+          return;
+        }
+        resolve(resp || {});
+      });
+    } catch (e) {
+      if (!settled) {
+        settled = true;
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
+    }
+  });
+}
+
+/**
+ * agent が起動済みであることを保証する。未到達なら Native Messaging で起動依頼し、
+ * tunnel/HTTP server が立ち上がるまで `/ext/info` を polling する。
+ */
+async function ensureAgentRunning(base) {
+  if (await pingAgent(base)) return; // 既に起動済み
+
+  reportStatus("starting", "Native Messaging で agent を起動中…");
+  await startAgentViaNative(); // host 未登録なら throw → connect() が error 表示
+
+  // spawn 直後は ext server 未バインドのことがあるので最大 ~10s 待つ。
+  for (let i = 0; i < 20; i++) {
+    if (await pingAgent(base)) return;
+    await sleep(500);
+  }
+  throw new Error("agent を起動したが ext server に到達できない");
 }
 
 /** popup / storage の設定を読む。Relay URL 未設定なら手元 agent (19222) に fallback。 */
@@ -84,6 +147,19 @@ async function connect() {
 
   // agent モード: localhost の cdp-agent に long-poll で繋ぐ。session/token 不要。
   if (isAgentUrl(cfg.relayUrl)) {
+    // agent 未起動なら Native Messaging で起動依頼する (cdp-relay#33)。
+    const agentBase = cfg.relayUrl.trim().replace(/\/+$/, "");
+    try {
+      await ensureAgentRunning(agentBase);
+    } catch (e) {
+      reportStatus(
+        "error",
+        "agent 起動失敗: " +
+          (e && e.message ? e.message : String(e)) +
+          " (cdp-agent --install-native-host 済みか確認)",
+      );
+      return;
+    }
     try {
       await attach(cfg.tabId);
     } catch (e) {
