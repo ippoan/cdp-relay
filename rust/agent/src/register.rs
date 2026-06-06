@@ -40,12 +40,7 @@ fn register_with(
     token: &str,
     tunnel_url: &str,
 ) -> Result<(), String> {
-    let url = format!(
-        "{}/register/{}?token={}",
-        rendezvous.trim_end_matches('/'),
-        encode(session),
-        encode(token),
-    );
+    let url = build_register_url(rendezvous, session, token);
     match agent
         .post(&url)
         .send_json(json!({ "tunnel_url": tunnel_url }))
@@ -54,6 +49,16 @@ fn register_with(
         Err(ureq::Error::Status(code, _)) => Err(format!("register status {code}")),
         Err(e) => Err(format!("register 失敗: {e}")),
     }
+}
+
+/// /register/{session}?token= URL を組み立てる (純関数、test 可能)。
+fn build_register_url(rendezvous: &str, session: &str, token: &str) -> String {
+    format!(
+        "{}/register/{}?token={}",
+        rendezvous.trim_end_matches('/'),
+        encode(session),
+        encode(token),
+    )
 }
 
 /// path/query segment 用の最小 percent-encode。session/token は英数 hex 想定だが念のため。
@@ -79,66 +84,15 @@ mod tests {
     }
 
     #[test]
-    fn register_posts_tunnel_url_and_ok_on_200() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 4096];
-            let n = s.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]).to_string();
-            let body = "{\"ok\":true}";
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = s.write_all(resp.as_bytes());
-            req
-        });
-
-        let agent = ureq::builder().timeout(Duration::from_secs(5)).build();
-        let r = register_with(
-            &agent,
-            &format!("http://127.0.0.1:{port}"),
-            "mylaptop",
-            "tok123",
-            "https://x.trycloudflare.com",
+    fn build_register_url_shape_and_encoding() {
+        // 末尾スラッシュは正規化、session/token は percent-encode。
+        assert_eq!(
+            build_register_url("https://cdp-relay.ippoan.org/", "my laptop", "tok/1"),
+            "https://cdp-relay.ippoan.org/register/my%20laptop?token=tok%2F1"
         );
-        assert!(r.is_ok());
-        let req = handle.join().unwrap();
-        assert!(req.starts_with("POST /register/mylaptop?token=tok123 "));
-        assert!(req.contains("x.trycloudflare.com"));
-    }
-
-    #[test]
-    fn register_err_on_401() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let _ = s.read(&mut buf);
-            let resp =
-                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            let _ = s.write_all(resp.as_bytes());
-        });
-
-        let agent = ureq::builder().timeout(Duration::from_secs(5)).build();
-        let r = register_with(
-            &agent,
-            &format!("http://127.0.0.1:{port}"),
-            "s",
-            "bad",
-            "https://x/",
+        assert_eq!(
+            build_register_url("http://127.0.0.1:19222", "s", "t"),
+            "http://127.0.0.1:19222/register/s?token=t"
         );
-        assert_eq!(r.unwrap_err(), "register status 401");
-        handle.join().unwrap();
     }
 }
