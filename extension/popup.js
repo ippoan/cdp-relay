@@ -2,6 +2,12 @@
 
 const $ = (id) => document.getElementById(id);
 
+// 接続用プロンプト生成に使う値は popup を開いた時点で先読みキャッシュする。
+// クリック handler 内で fetch を await すると user gesture が切れて
+// clipboard.writeText が拒否されるため (cdp-relay#33)。
+let cachedMcpUrl = "";
+let activeTabUrl = "";
+
 async function restore() {
   // 現在の拡張バージョンを表示 (manifest.json の version)。
   $("ver").textContent = "v" + chrome.runtime.getManifest().version;
@@ -24,10 +30,12 @@ async function restore() {
     sel.appendChild(opt);
   }
   // 既定は現在アクティブなタブ。
-  if (c.tabId == null) {
-    const active = tabs.find((t) => t.active);
-    if (active) sel.value = String(active.id);
-  }
+  const active = tabs.find((t) => t.active);
+  if (active && active.url) activeTabUrl = active.url;
+  if (c.tabId == null && active) sel.value = String(active.id);
+
+  // MCP URL を先読みしておく (クリック時は await を挟まず同期コピーできるように)。
+  refreshMcpUrl();
 }
 
 function setStatus(text, cls) {
@@ -45,11 +53,65 @@ async function save() {
   });
 }
 
+/** agent の /ext/info から MCP URL を取得して cache する。失敗時は空文字。 */
+async function refreshMcpUrl() {
+  const relayUrl = ($("relayUrl").value.trim() || "http://127.0.0.1:19222").replace(/\/+$/, "");
+  try {
+    const info = await fetch(`${relayUrl}/ext/info`).then((r) => r.json());
+    cachedMcpUrl = (info && info.mcp_url) || "";
+  } catch {
+    cachedMcpUrl = "";
+  }
+  return cachedMcpUrl;
+}
+
+/** CCoW に貼る接続用プロンプトを組み立てる。 */
+function buildPrompt(mcp, here) {
+  return (
+    `手元 Chrome を cdp-relay 経由で操作してください。\n` +
+    `MCP エンドポイント: ${mcp}\n\n` +
+    `この MCP に対し tools/call で browser_navigate / browser_screenshot を使えます。\n` +
+    `まず browser_screenshot で現在の画面（${here}）を確認してから、指示に従って操作してください。\n\n` +
+    `例: curl -sS -X POST ${mcp} -H 'Content-Type: application/json' \\\n` +
+    `  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"browser_screenshot","arguments":{}}}'`
+  );
+}
+
+/** textarea に出して全選択する (手動コピーの保険、常に表示)。 */
+function showPrompt(text) {
+  const ta = $("promptOut");
+  ta.value = text;
+  ta.style.display = "block";
+  ta.focus();
+  ta.select();
+}
+
+/**
+ * gesture を保ったまま同期的にコピーする。textarea を選択して execCommand('copy')
+ * を使う (popup でも確実)。併せて clipboard API も fire-and-forget で試す。
+ * 戻り値は execCommand の成否 (false でも textarea から手動コピー可)。
+ */
+function copyTextSync(text) {
+  showPrompt(text);
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).catch(() => {});
+  }
+  return ok;
+}
+
 $("connect").addEventListener("click", async () => {
   await save();
   setStatus("接続中…");
   const res = await chrome.runtime.sendMessage({ type: "cdp-relay-connect" }).catch((e) => ({ ok: false, error: String(e) }));
   if (!res || !res.ok) setStatus("接続失敗: " + (res && res.error ? res.error : "unknown"), "err");
+  // 接続したら tunnel URL が遅れて立つので、少し置いて先読みし直す。
+  setTimeout(refreshMcpUrl, 4000);
 });
 
 $("disconnect").addEventListener("click", async () => {
@@ -65,35 +127,26 @@ $("reload").addEventListener("click", () => {
   }
 });
 
-// 接続用プロンプトをコピー: agent の /ext/info から MCP URL を取り、現在タブと併せて
-// CCoW (Claude) に貼るだけで手元 Chrome を操作開始できるプロンプトをクリップボードへ。
+// 接続用プロンプトをコピー: 先読み済みの MCP URL から同期コピー。
+// 未取得なら取りに行き、textarea に出して手動コピーに倒す (gesture が切れるため)。
 $("copyPrompt").addEventListener("click", async () => {
-  try {
-    const relayUrl = ($("relayUrl").value.trim() || "http://127.0.0.1:19222").replace(/\/+$/, "");
-    const info = await fetch(`${relayUrl}/ext/info`)
-      .then((r) => r.json())
-      .catch(() => ({ mcp_url: "" }));
-    const mcp = info.mcp_url || "";
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const here = tab && tab.url ? tab.url : "(現在のタブ)";
-
-    if (!mcp) {
-      setStatus("MCP URL 未確定（agent が tunnel を張るまで待つ）", "err");
-      return;
-    }
-    const prompt =
-      `手元 Chrome を cdp-relay 経由で操作してください。\n` +
-      `MCP エンドポイント: ${mcp}\n\n` +
-      `この MCP に対し tools/call で browser_navigate / browser_screenshot を使えます。\n` +
-      `まず browser_screenshot で現在の画面（${here}）を確認してから、指示に従って操作してください。\n\n` +
-      `例: curl -sS -X POST ${mcp} -H 'Content-Type: application/json' \\\n` +
-      `  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"browser_screenshot","arguments":{}}}'`;
-
-    await navigator.clipboard.writeText(prompt);
-    setStatus("接続用プロンプトをコピーしました（CCoW に貼り付け）", "ok");
-  } catch (e) {
-    setStatus("コピー失敗: " + (e && e.message ? e.message : String(e)), "err");
+  const here = activeTabUrl || "(現在のタブ)";
+  if (cachedMcpUrl) {
+    const ok = copyTextSync(buildPrompt(cachedMcpUrl, here));
+    setStatus(
+      ok ? "接続用プロンプトをコピーしました（CCoW に貼り付け）" : "下の枠から手動でコピーしてください",
+      ok ? "ok" : "err",
+    );
+    return;
   }
+  // 未取得: ここで取得 (この後 gesture が切れるので textarea 手動コピーに倒す)。
+  const mcp = await refreshMcpUrl();
+  if (!mcp) {
+    setStatus("MCP URL 未確定（agent が tunnel を張るまで数秒待って再度）", "err");
+    return;
+  }
+  showPrompt(buildPrompt(mcp, here));
+  setStatus("下の枠に表示しました。Ctrl+C で手動コピーしてください", "ok");
 });
 
 // background からの状態通知。
