@@ -5,6 +5,7 @@
     <style>
       body { width: 320px; font: 13px/1.5 system-ui, sans-serif; margin: 0; padding: 12px; }
       h1 { font-size: 14px; margin: 0 0 8px; }
+      #ver { font-weight: normal; font-size: 11px; color: #888; }
       label { display: block; margin: 6px 0 2px; font-weight: 600; }
       input, select { width: 100%; box-sizing: border-box; padding: 4px 6px; }
       .row { margin-bottom: 6px; }
@@ -16,7 +17,7 @@
     </style>
   </head>
   <body>
-    <h1>cdp-relay</h1>
+    <h1>cdp-relay <span id="ver"></span></h1>
     <div class="row">
       <label for="relayUrl">Relay URL</label>
       <input id="relayUrl" placeholder="https://cdp-relay.ippoan.org または http://127.0.0.1:PORT" />
@@ -37,6 +38,7 @@
       <button id="connect">接続</button>
       <button id="disconnect">切断</button>
     </div>
+    <button id="reload" style="width: 100%; margin-top: 6px;">更新（拡張を再読込）</button>
     <div id="status">未接続</div>
     <script src="popup.js"></script>
   </body>
