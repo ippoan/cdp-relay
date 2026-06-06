@@ -153,10 +153,18 @@ $("disconnect").addEventListener("click", async () => {
 
 // 更新ボタン: 拡張を再読込してディスク上の最新ファイル (agent が更新したもの) を反映。
 // unpacked 拡張は reload でディスクから再読込される。接続は切れるので再接続が必要。
+// NOTE: 拡張 popup 内で confirm()/alert() を呼ぶと、ダイアログ表示で popup が focus を
+// 失って閉じ、その瞬間 confirm が dismiss (false) 扱いになって reload に到達しない
+// (= 更新ボタンが「効かない」ように見える)。popup を閉じない 2 段階クリックで確認する。
+let reloadArmed = false;
 $("reload").addEventListener("click", () => {
-  if (confirm("拡張を再読込します（接続は切れます）。agent が更新した最新ファイルが反映されます。")) {
-    chrome.runtime.reload();
+  if (!reloadArmed) {
+    reloadArmed = true;
+    $("reload").textContent = "もう一度押すと再読込（接続が切れます）";
+    setStatus("再読込の確認待ち。もう一度「更新」を押すと反映されます。");
+    return;
   }
+  chrome.runtime.reload();
 });
 
 // 接続用プロンプトをコピー: 先読み済みの MCP URL から同期コピー。
