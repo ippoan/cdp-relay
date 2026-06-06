@@ -65,6 +65,25 @@ export default {
       return text("method not allowed", 405);
     }
 
+    // /register/{session} POST — 手元 agent が quick tunnel URL を登録 (M3)。
+    // tunnel_url は capability なので /ext と同じ relay-token / pair code 認証。
+    const reg = path.match(/^\/register\/([^/]+)\/?$/);
+    if (reg) {
+      if (req.method !== "POST") return text("method not allowed", 405);
+      const auth = await edgeAuth(req, env);
+      if (auth instanceof Response) return auth;
+      return routeToDo(env, reg[1], req, auth);
+    }
+
+    // /lookup/{session} GET — CCoW proxy が tunnel URL を引く (M3)。同じく要認証。
+    const look = path.match(/^\/lookup\/([^/]+)\/?$/);
+    if (look) {
+      if (req.method !== "GET") return text("method not allowed", 405);
+      const auth = await edgeAuth(req, env);
+      if (auth instanceof Response) return auth;
+      return routeToDo(env, look[1], req, auth);
+    }
+
     return text("not found", 404);
   },
 };
@@ -162,6 +181,8 @@ function landingPage(): Response {
       <tr><td><code>GET /ext/{session}</code></td><td>拡張の WS upgrade。<code>?token=</code> 必須</td></tr>
       <tr><td><code>PUT /shot/{session}</code></td><td>拡張が screenshot を投入。token 必須</td></tr>
       <tr><td><code>GET /shot/{session}/{id}</code></td><td>screenshot 一時配信 (予測不能 id)</td></tr>
+      <tr><td><code>POST /register/{session}</code></td><td>手元 agent が quick tunnel URL を登録。token 必須</td></tr>
+      <tr><td><code>GET /lookup/{session}</code></td><td>CCoW proxy が tunnel URL を引く。token 必須</td></tr>
       <tr><td><code>GET /health</code></td><td>ヘルスチェック</td></tr>
     </table>
   </main>

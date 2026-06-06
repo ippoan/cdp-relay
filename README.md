@@ -45,6 +45,8 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
 | `GET /ext/{session}` | 拡張の WS upgrade。`?token=` 必須 (hibernatable hold) |
 | `PUT /shot/{session}` | 拡張が screenshot(PNG) を投入。token 必須。`{ shot_url }` を返す |
 | `GET /shot/{session}/{id}` | screenshot 一時配信 (予測不能 id ゆえ token 不要、TTL 既定 5 分) |
+| `POST /register/{session}` | 手元 agent が quick tunnel URL を登録。token 必須 (rendezvous, #12 M3) |
+| `GET /lookup/{session}` | CCoW proxy が session の tunnel URL を引く。token 必須 (rendezvous, #12 M3) |
 | `GET /health` | ヘルスチェック |
 | `GET /` | 説明ページ |
 
