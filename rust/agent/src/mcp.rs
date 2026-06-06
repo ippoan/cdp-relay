@@ -1,10 +1,11 @@
-//! agent 側の最小 MCP server ロジック (cdp-relay#12 M5)。
+//! agent 側の最小 MCP server ロジック (cdp-relay#12 M5/M2)。
 //!
-//! Streamable HTTP の `/mcp` に来る JSON-RPC を捌く純ロジック。HTTP/socket には
-//! 依存しないので unit test しやすい。tool の実体 (CDP) はまだ stub で、M2 (NM 経由で
-//! 拡張の chrome.debugger を叩く) で差し込む。tool 表面 (navigate / screenshot) は
-//! 現行 worker 版 (`src/mcp/tools.ts`) に合わせる。
+//! Streamable HTTP の `/mcp` に来る JSON-RPC を捌く純ロジック。tool の実体 (CDP) は
+//! `CommandSink` (= ExtBridge) 経由で拡張に投げる。HTTP/socket には依存しないので
+//! sink を fake にすれば unit test できる。tool 表面 (navigate / screenshot) は現行
+//! worker 版 (`src/mcp/tools.ts`) に合わせる。
 
+use crate::extbridge::CommandSink;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -28,8 +29,8 @@ fn new_session_id() -> String {
     format!("{t:x}-{n:x}")
 }
 
-/// JSON-RPC 1 メッセージ (1 行) を処理する。
-pub fn handle(body: &str) -> McpReply {
+/// JSON-RPC 1 メッセージ (1 行) を処理する。tool 実行は sink (拡張) に委譲する。
+pub fn handle(body: &str, sink: &dyn CommandSink) -> McpReply {
     let req: Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(_) => {
@@ -72,7 +73,7 @@ pub fn handle(body: &str) -> McpReply {
             session_id: None,
         },
         "tools/call" => McpReply {
-            body: Some(tools_call(&id, &req)),
+            body: Some(tools_call(&id, &req, sink)),
             session_id: None,
         },
         "ping" => McpReply {
@@ -100,14 +101,14 @@ fn tools_list() -> Value {
             },
             {
                 "name": "browser_screenshot",
-                "description": "手元 Chrome の viewport を撮影し shot_url を返す。",
+                "description": "手元 Chrome の viewport を撮影し PNG を返す。",
                 "inputSchema": { "type": "object", "properties": {} }
             }
         ]
     })
 }
 
-fn tools_call(id: &Value, req: &Value) -> String {
+fn tools_call(id: &Value, req: &Value, sink: &dyn CommandSink) -> String {
     let name = req
         .pointer("/params/name")
         .and_then(Value::as_str)
@@ -123,15 +124,28 @@ fn tools_call(id: &Value, req: &Value) -> String {
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 return error_envelope(id, -32602, "url must be http(s)");
             }
-            // TODO(M2): NM 経由で拡張に navigate を投げて CDP 実行する。今は stub。
-            result_envelope(
-                id,
-                tool_text(&format!("navigated to {url} (stub — CDP は M2/NM で接続)")),
-            )
+            // 拡張に navigate を投げて CDP 実行を待つ (M2)。
+            match sink.send("navigate", json!({ "url": url })) {
+                Ok(_) => result_envelope(id, tool_text(&format!("navigated to {url}"))),
+                Err(e) => error_envelope(id, -32000, &e),
+            }
         }
         "browser_screenshot" => {
-            // TODO(M2): NM 経由で Page.captureScreenshot → shot 配信。今は stub。
-            result_envelope(id, tool_text("screenshot stub (CDP は M2/NM で接続)"))
+            // 拡張が Page.captureScreenshot した base64 PNG を MCP image content で返す。
+            match sink.send("screenshot", json!({})) {
+                Ok(v) => {
+                    let data = v.get("data").and_then(Value::as_str).unwrap_or("");
+                    result_envelope(
+                        id,
+                        json!({
+                            "content": [
+                                { "type": "image", "data": data, "mimeType": "image/png" }
+                            ]
+                        }),
+                    )
+                }
+                Err(e) => error_envelope(id, -32000, &e),
+            }
         }
         other => error_envelope(id, -32601, &format!("unknown tool: {other}")),
     }
@@ -153,6 +167,19 @@ fn error_envelope(id: &Value, code: i64, message: &str) -> String {
 mod tests {
     use super::*;
 
+    /// 固定応答を返す fake sink。
+    struct FakeSink(Result<Value, String>);
+    impl CommandSink for FakeSink {
+        fn send(&self, _method: &str, _params: Value) -> Result<Value, String> {
+            self.0.clone()
+        }
+    }
+    fn ok_sink() -> FakeSink {
+        FakeSink(Ok(
+            json!({ "url": "https://example.com/", "data": "QUFBQQ==" }),
+        ))
+    }
+
     fn parse(body: &str) -> Value {
         serde_json::from_str(body).unwrap()
     }
@@ -161,6 +188,7 @@ mod tests {
     fn initialize_returns_serverinfo_and_session_id() {
         let r = handle(
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
+            &ok_sink(),
         );
         assert!(r.session_id.is_some());
         let v = parse(r.body.as_deref().unwrap());
@@ -171,14 +199,20 @@ mod tests {
 
     #[test]
     fn notification_has_no_response() {
-        let r = handle(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+        let r = handle(
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            &ok_sink(),
+        );
         assert!(r.body.is_none());
         assert!(r.session_id.is_none());
     }
 
     #[test]
     fn tools_list_exposes_navigate_and_screenshot() {
-        let r = handle(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
+        let r = handle(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            &ok_sink(),
+        );
         let v = parse(r.body.as_deref().unwrap());
         let names: Vec<&str> = v["result"]["tools"]
             .as_array()
@@ -190,9 +224,10 @@ mod tests {
     }
 
     #[test]
-    fn tools_call_navigate_stub_returns_text() {
+    fn navigate_sends_to_sink_and_returns_text() {
         let r = handle(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"browser_navigate","arguments":{"url":"https://example.com/"}}}"#,
+            &ok_sink(),
         );
         let v = parse(r.body.as_deref().unwrap());
         let text = v["result"]["content"][0]["text"].as_str().unwrap();
@@ -200,18 +235,46 @@ mod tests {
     }
 
     #[test]
-    fn tools_call_navigate_rejects_non_http() {
+    fn navigate_rejects_non_http_without_calling_sink() {
         let r = handle(
             r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"browser_navigate","arguments":{"url":"ftp://x"}}}"#,
+            &FakeSink(Err("should not be called".into())),
         );
         let v = parse(r.body.as_deref().unwrap());
         assert_eq!(v["error"]["code"], -32602);
     }
 
     #[test]
+    fn screenshot_returns_image_content() {
+        let r = handle(
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"browser_screenshot","arguments":{}}}"#,
+            &ok_sink(),
+        );
+        let v = parse(r.body.as_deref().unwrap());
+        assert_eq!(v["result"]["content"][0]["type"], "image");
+        assert_eq!(v["result"]["content"][0]["mimeType"], "image/png");
+        assert_eq!(v["result"]["content"][0]["data"], "QUFBQQ==");
+    }
+
+    #[test]
+    fn tool_error_propagates_as_jsonrpc_error() {
+        let r = handle(
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"browser_navigate","arguments":{"url":"https://x/"}}}"#,
+            &FakeSink(Err("cdp_timeout".into())),
+        );
+        let v = parse(r.body.as_deref().unwrap());
+        assert_eq!(v["error"]["code"], -32000);
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("cdp_timeout"));
+    }
+
+    #[test]
     fn unknown_tool_is_method_not_found() {
         let r = handle(
-            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"nope","arguments":{}}}"#,
+            &ok_sink(),
         );
         let v = parse(r.body.as_deref().unwrap());
         assert_eq!(v["error"]["code"], -32601);
@@ -219,14 +282,14 @@ mod tests {
 
     #[test]
     fn unknown_method_is_method_not_found() {
-        let r = handle(r#"{"jsonrpc":"2.0","id":6,"method":"foo/bar"}"#);
+        let r = handle(r#"{"jsonrpc":"2.0","id":8,"method":"foo/bar"}"#, &ok_sink());
         let v = parse(r.body.as_deref().unwrap());
         assert_eq!(v["error"]["code"], -32601);
     }
 
     #[test]
     fn invalid_json_is_parse_error() {
-        let r = handle("not json");
+        let r = handle("not json", &ok_sink());
         let v = parse(r.body.as_deref().unwrap());
         assert_eq!(v["error"]["code"], -32700);
     }

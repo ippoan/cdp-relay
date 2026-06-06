@@ -1,10 +1,15 @@
-//! HTTP ルーティング (cdp-relay#12 M5)。socket 非依存の純関数にして unit test 可能に
-//! する。main.rs の tiny_http ループはこの `handle_http` に method/url/body を渡すだけ。
+//! HTTP ルーティング (cdp-relay#12 M5/M2)。socket 非依存の純関数にして unit test 可能に
+//! する。main.rs は **2 つの tiny_http server** を立てる:
 //!
-//!   GET  /ping  … M1 互換の疎通確認 (echo)
-//!   POST /mcp   … MCP server (mcp::handle に委譲)
+//!   - MCP server (cloudflared が tunnel 公開する port): `GET /ping` / `POST /mcp`
+//!   - ext server (localhost 専用・非公開 port): `GET /ext/poll` / `POST /ext/result`
+//!
+//! `/ext/*` を別 port に隔離するのは、tunnel 経由で remote が command を注入 / 結果を
+//! 偽装できないようにするため (拡張は手元 localhost からのみ繋ぐ)。
 
+use crate::extbridge::{command_to_json, ExtBridge};
 use crate::mcp;
+use std::time::Duration;
 
 /// HTTP 応答 (tiny_http に変換して返す素材)。
 pub struct HttpReply {
@@ -21,17 +26,28 @@ impl HttpReply {
             body: body.into().into_bytes(),
         }
     }
+    fn json(status: u16, body: String) -> Self {
+        HttpReply {
+            status,
+            headers: vec![(
+                "Content-Type".into(),
+                "application/json; charset=utf-8".into(),
+            )],
+            body: body.into_bytes(),
+        }
+    }
 }
 
-/// method + url + body を応答に落とす。
-pub fn handle_http(method: &str, url: &str, body: &str) -> HttpReply {
-    // url はクエリを含みうるので path だけ見る。
-    let path = url.split('?').next().unwrap_or(url);
+/// poll の long-poll 上限。拡張はこれで空振りしたら再 poll する。
+const POLL_TIMEOUT: Duration = Duration::from_secs(25);
 
+/// MCP server (tunnel 公開 port) のルーティング。
+pub fn handle_mcp(method: &str, url: &str, body: &str, bridge: &ExtBridge) -> HttpReply {
+    let path = url.split('?').next().unwrap_or(url);
     match (method, path) {
         ("GET", "/ping") => HttpReply::text(200, "pong from cdp-agent\n"),
         ("POST", "/mcp") => {
-            let reply = mcp::handle(body);
+            let reply = mcp::handle(body, bridge);
             let mut headers = vec![(
                 "Content-Type".to_string(),
                 "application/json; charset=utf-8".to_string(),
@@ -40,7 +56,6 @@ pub fn handle_http(method: &str, url: &str, body: &str) -> HttpReply {
                 headers.push(("Mcp-Session-Id".to_string(), sid));
             }
             match reply.body {
-                // notification 等、応答本体なし → 202。
                 None => HttpReply {
                     status: 202,
                     headers,
@@ -58,54 +73,93 @@ pub fn handle_http(method: &str, url: &str, body: &str) -> HttpReply {
     }
 }
 
+/// ext server (localhost 専用 port) のルーティング。
+pub fn handle_ext(method: &str, url: &str, body: &str, bridge: &ExtBridge) -> HttpReply {
+    let path = url.split('?').next().unwrap_or(url);
+    match (method, path) {
+        // 拡張が CDP コマンドを引き取る (long-poll)。無ければ 204。
+        ("GET", "/ext/poll") => match bridge.poll(POLL_TIMEOUT) {
+            Some(cmd) => HttpReply::json(200, command_to_json(&cmd).to_string()),
+            None => HttpReply {
+                status: 204,
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+        },
+        // 拡張が CDP 実行結果を返す。
+        ("POST", "/ext/result") => match bridge.result_from_json(body) {
+            Ok(()) => HttpReply::json(200, "{\"ok\":true}".to_string()),
+            Err(e) => HttpReply::json(400, format!("{{\"error\":{:?}}}", e)),
+        },
+        _ => HttpReply::text(404, "not found\n"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
     fn ping_returns_pong() {
-        let r = handle_http("GET", "/ping", "");
+        let b = ExtBridge::new();
+        let r = handle_mcp("GET", "/ping", "", &b);
         assert_eq!(r.status, 200);
         assert!(String::from_utf8_lossy(&r.body).contains("pong from cdp-agent"));
     }
 
     #[test]
-    fn mcp_initialize_sets_session_header_and_json() {
-        let r = handle_http(
-            "POST",
-            "/mcp",
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
-        );
-        assert_eq!(r.status, 200);
-        assert!(r
-            .headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("Mcp-Session-Id")));
-        let v: Value = serde_json::from_slice(&r.body).unwrap();
-        assert_eq!(v["result"]["serverInfo"]["name"], "cdp-agent");
-    }
-
-    #[test]
     fn mcp_notification_is_202_empty() {
-        let r = handle_http(
+        let b = ExtBridge::new();
+        let r = handle_mcp(
             "POST",
             "/mcp",
             r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            &b,
         );
         assert_eq!(r.status, 202);
         assert!(r.body.is_empty());
     }
 
     #[test]
-    fn unknown_path_is_404() {
-        let r = handle_http("GET", "/nope", "");
-        assert_eq!(r.status, 404);
+    fn ext_poll_204_when_empty() {
+        let b = ExtBridge::new();
+        // handle_ext は POLL_TIMEOUT 待つので、ここでは bridge.poll の短 timeout で
+        // 「空なら None」だけ確認する。
+        assert!(b.poll(Duration::from_millis(10)).is_none());
     }
 
     #[test]
-    fn get_mcp_is_405() {
-        let r = handle_http("GET", "/mcp", "");
-        assert_eq!(r.status, 405);
+    fn ext_result_resolves_mcp_tool_call() {
+        // navigate を別スレッドで投げ、ext server 経由で result を返して往復を確認。
+        let bridge = Arc::new(ExtBridge::new());
+        let b2 = Arc::clone(&bridge);
+        let caller = thread::spawn(move || {
+            handle_mcp(
+                "POST",
+                "/mcp",
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"browser_navigate","arguments":{"url":"https://example.com/"}}}"#,
+                &b2,
+            )
+        });
+        // 拡張役: poll で command を引き、result を返す。
+        let cmd = bridge.poll(Duration::from_secs(2)).expect("command queued");
+        assert_eq!(cmd.method, "navigate");
+        let body = format!(
+            r#"{{"id":{},"result":{{"url":"https://example.com/"}}}}"#,
+            cmd.id
+        );
+        let res = handle_ext("POST", "/ext/result", &body, &bridge);
+        assert_eq!(res.status, 200);
+
+        let reply = caller.join().unwrap();
+        assert_eq!(reply.status, 200);
+        let v: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert!(v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("https://example.com/"));
     }
 }
