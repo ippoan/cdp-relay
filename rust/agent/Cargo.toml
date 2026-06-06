@@ -4,11 +4,15 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "手元マシンで cf quick tunnel を張り、/mcp (MCP server) と echo を tunnel 先に出す PoC agent (cdp-relay#12)"
+description = "手元マシンで cf quick tunnel を張り、/mcp (MCP server) と echo を tunnel 先に出す PoC agent。GitHub Releases から self-update する (cdp-relay#12)"
 
-# M1 は依存ゼロ (std) だったが、M5 で /mcp を MCP server 化したため tiny_http + serde_json
-# を入れる。HTTP body の正しい読み取りと JSON-RPC のために必要。CDP 実体は M2 (NM 経由で
-# 拡張の chrome.debugger) で差し込む。
+# M1 は依存ゼロ (std) だったが、M5 で /mcp を MCP server 化 (tiny_http + serde_json)、
+# M6 で self-update (ureq + zip + self_replace) を足した。CDP 実体は M2 (NM 経由で拡張の
+# chrome.debugger) で差し込む。
 [dependencies]
 tiny_http = "0.12"
 serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+native-tls = "0.2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+self-replace = "1"
