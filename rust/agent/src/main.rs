@@ -94,11 +94,25 @@ fn main() {
         return;
     }
 
+    // native-host manifest の JSON を stdout に出して終了する (registry は触らない)。
+    // Windows での登録内容確認 / 手動配置のデバッグ用 (#33)。
+    if args.iter().any(|a| a == "--print-native-host-manifest") {
+        match std::env::current_exe() {
+            Ok(exe) => println!("{}", nmhost::native_host_manifest_json(&exe)),
+            Err(e) => {
+                eprintln!("[cdp-agent] current_exe 取得失敗: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
             "cdp-agent — cf quick tunnel + /mcp MCP server + 拡張ブリッジ (cdp-relay#12)\n\n\
              usage: cdp-agent [--install-native-host | --native-host]\n  \
              --install-native-host  Chrome/Edge の Native Messaging host を登録して終了 (#33)\n  \
+             --print-native-host-manifest  native-host manifest JSON を表示して終了 (登録しない)\n  \
              --native-host          stdio launcher として動く (通常は Chrome が自動で付与)\n  \
              CDP_AGENT_ECHO_ONLY=1   HTTP server だけ起動 (tunnel を張らない)\n  \
              CLOUDFLARED_BIN=<path>  cloudflared バイナリの path を上書き\n  \
