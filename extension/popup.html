@@ -23,13 +23,13 @@
       <label for="relayUrl">Relay URL</label>
       <input id="relayUrl" placeholder="https://cdp-relay.ippoan.org または http://127.0.0.1:PORT" />
     </div>
-    <div class="row">
+    <div class="row" id="sessionRow">
       <label for="session">Session</label>
-      <input id="session" placeholder="my-laptop (agent mode では不要)" />
+      <input id="session" placeholder="my-laptop (WS mode のみ)" />
     </div>
-    <div class="row">
+    <div class="row" id="tokenRow">
       <label for="token">Token</label>
-      <input id="token" type="password" placeholder="pair token (agent mode では空でOK)" />
+      <input id="token" type="password" placeholder="pair token (WS mode のみ)" />
     </div>
     <div class="row">
       <label for="tab">対象タブ</label>

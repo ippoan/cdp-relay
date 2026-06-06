@@ -75,10 +75,22 @@ pub fn handle_mcp(method: &str, url: &str, body: &str, bridge: &ExtBridge) -> Ht
 
 /// ext server (localhost 専用 port) のルーティング。
 pub fn handle_ext(method: &str, url: &str, body: &str, bridge: &ExtBridge) -> HttpReply {
+    handle_ext_with_poll_timeout(method, url, body, bridge, POLL_TIMEOUT)
+}
+
+/// `handle_ext` の本体。long-poll の timeout を注入できるようにして、空振り 204 経路を
+/// 25s 待たずに test できるようにしている (POLL_TIMEOUT は本番値、test は短い値を渡す)。
+fn handle_ext_with_poll_timeout(
+    method: &str,
+    url: &str,
+    body: &str,
+    bridge: &ExtBridge,
+    poll_timeout: Duration,
+) -> HttpReply {
     let path = url.split('?').next().unwrap_or(url);
     match (method, path) {
         // 拡張が CDP コマンドを引き取る (long-poll)。無ければ 204。
-        ("GET", "/ext/poll") => match bridge.poll(POLL_TIMEOUT) {
+        ("GET", "/ext/poll") => match bridge.poll(poll_timeout) {
             Some(cmd) => HttpReply::json(200, command_to_json(&cmd).to_string()),
             None => HttpReply {
                 status: 204,
@@ -108,6 +120,7 @@ pub fn handle_ext(method: &str, url: &str, body: &str, bridge: &ExtBridge) -> Ht
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extbridge::CommandSink;
     use serde_json::Value;
     use std::sync::Arc;
     use std::thread;
@@ -183,5 +196,78 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("https://example.com/"));
+    }
+
+    #[test]
+    fn mcp_initialize_sets_session_header_and_200() {
+        let b = ExtBridge::new();
+        let r = handle_mcp(
+            "POST",
+            "/mcp",
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+            &b,
+        );
+        assert_eq!(r.status, 200);
+        assert!(r.headers.iter().any(|(k, _)| k == "Mcp-Session-Id"));
+    }
+
+    #[test]
+    fn mcp_get_is_405() {
+        let b = ExtBridge::new();
+        assert_eq!(handle_mcp("GET", "/mcp", "", &b).status, 405);
+    }
+
+    #[test]
+    fn mcp_unknown_path_404() {
+        let b = ExtBridge::new();
+        assert_eq!(handle_mcp("GET", "/nope", "", &b).status, 404);
+    }
+
+    #[test]
+    fn ext_poll_returns_queued_command_200() {
+        let bridge = Arc::new(ExtBridge::new());
+        let b2 = Arc::clone(&bridge);
+        // send は command を queue して result を待つ。別スレッドで投げる。
+        let producer = thread::spawn(move || {
+            let _ = b2.send("navigate", serde_json::json!({ "url": "https://x/" }));
+        });
+        // queue にあれば即返る。無ければ 2s 以内に producer が積む。
+        let r =
+            handle_ext_with_poll_timeout("GET", "/ext/poll", "", &bridge, Duration::from_secs(2));
+        assert_eq!(r.status, 200);
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(v["method"], "navigate");
+        // producer を解放する (result を返して send を resolve)。
+        let id = v["id"].as_u64().unwrap();
+        let _ = handle_ext(
+            "POST",
+            "/ext/result",
+            &format!("{{\"id\":{id},\"result\":{{}}}}"),
+            &bridge,
+        );
+        producer.join().unwrap();
+    }
+
+    #[test]
+    fn ext_poll_empty_returns_204() {
+        let b = ExtBridge::new();
+        let r = handle_ext_with_poll_timeout("GET", "/ext/poll", "", &b, Duration::from_millis(10));
+        assert_eq!(r.status, 204);
+        assert!(r.body.is_empty());
+    }
+
+    #[test]
+    fn ext_result_bad_json_is_400() {
+        let b = ExtBridge::new();
+        assert_eq!(
+            handle_ext("POST", "/ext/result", "not json", &b).status,
+            400
+        );
+    }
+
+    #[test]
+    fn ext_unknown_path_404() {
+        let b = ExtBridge::new();
+        assert_eq!(handle_ext("GET", "/ext/nope", "", &b).status, 404);
     }
 }

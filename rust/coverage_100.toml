@@ -1,0 +1,16 @@
+# cdp-agent 100% カバレッジ登録簿
+#
+# ここに登録したファイルは ci-workflows/rust-ci.yml の coverage gate で
+# 「cargo llvm-cov --text の missed line == 0」を CI で強制される。退化したら fail。
+#
+# - path は working_directory (= rust) からの相対パス
+# - 新たに 100% に到達したファイルを追加していく
+# - timeout / network / OS 固有 IO (main.rs / nmhost.rs の spawn・登録 /
+#   update.rs / register.rs の HTTP) を含むファイルは現状未登録。pure ロジックを
+#   別ファイルに切り出して 100% にできたら追加する。
+
+[[files]]
+path = "agent/src/mcp.rs"
+
+[[files]]
+path = "agent/src/server.rs"
