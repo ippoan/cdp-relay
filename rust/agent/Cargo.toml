@@ -22,3 +22,8 @@ url = "2"
 # 含めないので target-specific dep にする。
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+
+[build-dependencies]
+# Windows exe に asInvoker マニフェストを埋め、UAC の installer-detection 自動昇格を抑止する
+# (#33)。非 Windows target では build.rs 側で no-op。
+embed-manifest = "1"
