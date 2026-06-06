@@ -68,6 +68,20 @@ pub fn handle_mcp(method: &str, url: &str, body: &str, bridge: &ExtBridge) -> Ht
                 },
             }
         }
+        // health: version / 拡張接続状況 / 直近ログを返す。tunnel 公開なので remote
+        // (CCoW) からも curl <tunnel>/health で agent の状況を確認できる (#33)。
+        ("GET", "/health") => {
+            let poll_age = bridge.secs_since_last_poll();
+            let body = serde_json::json!({
+                "ok": true,
+                "version": crate::update::current_release_tag().unwrap_or("dev"),
+                "mcp_url": bridge.mcp_url().unwrap_or_default(),
+                "ext_last_poll_secs": poll_age,
+                "ext_connected": poll_age.map(|s| s < 30).unwrap_or(false),
+                "logs": crate::logbuf::snapshot(),
+            });
+            HttpReply::json(200, body.to_string())
+        }
         ("GET", "/mcp") => HttpReply::text(405, "use POST for /mcp\n"),
         _ => HttpReply::text(404, "not found\n"),
     }
@@ -215,6 +229,32 @@ mod tests {
     fn mcp_get_is_405() {
         let b = ExtBridge::new();
         assert_eq!(handle_mcp("GET", "/mcp", "", &b).status, 405);
+    }
+
+    #[test]
+    fn health_returns_version_and_logs() {
+        let b = ExtBridge::new();
+        b.set_mcp_url("https://x.trycloudflare.com/mcp".into());
+        // poll を一度呼んで ext_connected=true 経路を通す。
+        let _ = b.poll(Duration::from_millis(1));
+        let r = handle_mcp("GET", "/health", "", &b);
+        assert_eq!(r.status, 200);
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["version"], "dev");
+        assert_eq!(v["mcp_url"], "https://x.trycloudflare.com/mcp");
+        assert_eq!(v["ext_connected"], true);
+        assert!(v["logs"].is_array());
+    }
+
+    #[test]
+    fn health_ext_not_connected_when_never_polled() {
+        let b = ExtBridge::new();
+        let r = handle_mcp("GET", "/health", "", &b);
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        // 一度も poll していない → ext_connected=false, ext_last_poll_secs=null。
+        assert_eq!(v["ext_connected"], false);
+        assert!(v["ext_last_poll_secs"].is_null());
     }
 
     #[test]

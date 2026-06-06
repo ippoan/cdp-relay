@@ -14,3 +14,9 @@ path = "agent/src/mcp.rs"
 
 [[files]]
 path = "agent/src/server.rs"
+
+[[files]]
+path = "agent/src/extbridge.rs"
+
+[[files]]
+path = "agent/src/logbuf.rs"
