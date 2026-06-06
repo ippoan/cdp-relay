@@ -17,3 +17,8 @@ native-tls = "0.2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 self-replace = "1"
 url = "2"
+
+# Native Messaging host の registry 登録 (#33)。Windows のみ。CCoW (Linux) ビルドには
+# 含めないので target-specific dep にする。
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"

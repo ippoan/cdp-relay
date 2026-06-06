@@ -14,6 +14,7 @@
 
 mod extbridge;
 mod mcp;
+mod nmhost;
 mod register;
 mod server;
 mod update;
@@ -73,14 +74,37 @@ fn bind_port(server: &Server) -> u16 {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Chrome が Native Messaging で起動した場合 (argv に chrome-extension://… origin、または
+    // 明示の --native-host) は stdio launcher として動き、他は一切立てない (cdp-relay#33)。
+    if nmhost::is_native_host_invocation(&args) {
+        nmhost::run_native_host();
+        return;
+    }
+
+    // 手動で native-host を登録する。Chrome/Edge の HKCU registry + manifest を書く。
+    if args.iter().any(|a| a == "--install-native-host") {
+        match nmhost::install_native_host() {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => {
+                eprintln!("[cdp-agent] native-host 登録失敗: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
             "cdp-agent — cf quick tunnel + /mcp MCP server + 拡張ブリッジ (cdp-relay#12)\n\n\
-             usage: cdp-agent\n  \
+             usage: cdp-agent [--install-native-host | --native-host]\n  \
+             --install-native-host  Chrome/Edge の Native Messaging host を登録して終了 (#33)\n  \
+             --native-host          stdio launcher として動く (通常は Chrome が自動で付与)\n  \
              CDP_AGENT_ECHO_ONLY=1   HTTP server だけ起動 (tunnel を張らない)\n  \
              CLOUDFLARED_BIN=<path>  cloudflared バイナリの path を上書き\n  \
              CDP_AGENT_EXT_PORT=<n>  ext server の port (default 19222、拡張の接続先)\n  \
              CDP_AGENT_NO_SELFUPDATE 起動時 self-update を無効化\n  \
+             CDP_AGENT_NO_NM_REGISTER 起動時の native-host 自己登録を無効化\n  \
              CDP_AGENT_SESSION=<s>   rendezvous の session 名 (TOKEN と併せて tunnel URL を登録)\n  \
              CDP_AGENT_TOKEN=<t>     rendezvous の token (= RELAY_TOKEN)\n  \
              CDP_AGENT_RENDEZVOUS=<u> rendezvous base (default https://cdp-relay.ippoan.org)\n\n\
@@ -113,6 +137,15 @@ fn main() {
     let ext_port = bind_port(&ext_server);
     eprintln!("[cdp-agent] MCP http port {mcp_port} (tunnel 公開)  /ping /mcp");
     eprintln!("[cdp-agent] ext http port {ext_port} (localhost 専用)  /ext/poll /ext/result");
+
+    // Native Messaging host を idempotent に自己登録する (#33)。これで一度通常起動すれば、
+    // 次回以降は拡張が Native Messaging で agent を自動起動できる (Windows のみ実体)。
+    if std::env::var("CDP_AGENT_NO_NM_REGISTER").is_err() {
+        match nmhost::install_native_host() {
+            Ok(msg) => eprintln!("[cdp-agent] {msg}"),
+            Err(e) => eprintln!("[cdp-agent] native-host 自己登録 skip: {e}"),
+        }
+    }
 
     {
         let b = Arc::clone(&bridge);

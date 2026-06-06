@@ -146,6 +146,30 @@ MCP (`/mcp`) は ippoan 標準の **MCP-JWT** 認証なので、ref-files と同
 (token cache の MCP-JWT を `Authorization: Bearer` で渡す)。手動登録は `mcp-user-setup`
 skill 参照。拡張 popup の **Token** は `/ext` 用の `RELAY_TOKEN` で、MCP-JWT とは別物。
 
+## Native Messaging で agent を自動起動 (agent モード、#33)
+
+agent モード (Relay URL = `http://127.0.0.1:19222`) では、従来は先に `cdp-agent` を手元で
+**手動起動**しておく必要があった。Chrome **Native Messaging** を使い、拡張の「接続」時に
+agent が未起動なら自動で起動するようにした。
+
+仕組み (= **ランチャー方式**):
+
+1. 拡張は manifest の `key` で **固定 ID** (`ekadlloplnbagbidandccdheiemgocng`) を持つ
+2. `cdp-agent` を 1 度起動すると native-host manifest + HKCU registry を **自己登録**する
+   (`--install-native-host` でも明示登録可、admin 不要)
+3. 以降、拡張の「接続」で agent 未到達なら `chrome.runtime.sendNativeMessage` で
+   `com.ippoan.cdp_agent` を呼ぶ → host (= `cdp-agent.exe` が argv の origin を検出して
+   native-host モードで起動) が `cdp-agent` 本体を **detached spawn** して即応答
+4. spawn された本体が cloudflared tunnel + ext server (19222) を握る。native-host プロセスは
+   Chrome が port close で kill するが、本体は detached なので生き残る
+
+→ 手動起動は **MSI install 後の 1 回だけ** (= 自己登録のトリガ)。以降のセッションは
+拡張の「接続」だけで agent が立ち上がる。Windows 専用。
+
+> 既に起動済みなら native-host は spawn せず `already_running` を返す (二重起動しない)。
+> 自動起動を無効にしたい場合は agent を `CDP_AGENT_NO_NM_REGISTER=1` で起動すると
+> 自己登録しない。
+
 ## 開発
 
 ```sh
@@ -172,5 +196,6 @@ route を自動生成)。workers.dev も fallback で有効。MCP は `https://c
       stateless MCP 2 tool (`browser_navigate` / `browser_screenshot`)
 - [x] P3 (済): /mcp を MCP-JWT に統一 (ref-files) + custom domain `cdp-relay.ippoan.org` 有効化
 - [x] P3 (済): pair flow (`browser_pair` tool + DO 発行の短命 pairing code、Refs #7)
+- [x] M2c (済): agent モードで拡張から Native Messaging で `cdp-agent` を自動起動 (#33)
 - [ ] P3 (残): 残りツール (`click` / `type` / `eval` / `html` / `pdf` / `wait` / `tabs`) +
       claude-hooks (`write-mcp-user-scope.sh`) への自動 attach 登録
