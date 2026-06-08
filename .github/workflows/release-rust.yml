@@ -32,5 +32,10 @@ jobs:
           {"target":"x86_64-unknown-linux-gnu","os":"ubuntu-latest","archive":"tar.gz"},
           {"target":"x86_64-pc-windows-msvc","os":"windows-latest","archive":"zip","ext":".exe"}
         ]
+    # 各 archive を minisign 署名して `<asset>.minisig` を Release に添付する (#20)。
+    # agent の self-update は DL した zip をこの署名で検証してから self_replace する。
+    # 公開鍵は agent に hard-code、秘密鍵は secret-inject で投入した org secret。
+    secrets:
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
     permissions:
       contents: write

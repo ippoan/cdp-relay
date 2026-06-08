@@ -17,6 +17,9 @@ native-tls = "0.2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 self-replace = "1"
 url = "2"
+# self-update asset (Windows zip) の detached minisign 署名を検証する (#20)。
+# 検証専用の軽量 crate (署名生成は CI 側の minisign が担う)。
+minisign-verify = "0.2"
 
 # Native Messaging host の registry 登録 (#33)。Windows のみ。CCoW (Linux) ビルドには
 # 含めないので target-specific dep にする。
