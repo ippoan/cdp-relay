@@ -26,6 +26,18 @@ const WIN_ASSET_MARK: &str = "x86_64-pc-windows-msvc";
 const ASSET_HOST_ALLOWLIST: &[&str] = &["github.com", "objects.githubusercontent.com"];
 /// DL / 展開のサイズ上限 (zip bomb / 無制限 DL 対策)。実 release zip より十分大きい。
 const MAX_ASSET_BYTES: u64 = 64 * 1024 * 1024;
+/// detached 署名 (`.minisig`) の DL サイズ上限。minisign の .minisig は数百 byte なので
+/// 十分すぎる小さい cap を被せる (誤った巨大 body の掴み込み防止)。
+const MAX_SIG_BYTES: u64 = 16 * 1024;
+
+/// self-update asset の検証に使う minisign 公開鍵 (base64 1 行)。
+///
+/// 対応する秘密鍵は CI の GitHub Actions secret `MINISIGN_SECRET_KEY` に `secret-inject`
+/// 経由で投入され、release workflow が各 Windows zip を署名して `.zip.minisig` を Release に
+/// 添付する。公開鍵は秘密ではないのでここに hard-code してよい (= GitHub アカウント /
+/// トークン侵害で偽 asset が release に乗っても、この鍵で署名できなければ self_replace に
+/// 進まない、という supply-chain 防御層、#20)。
+const MINISIGN_PUBLIC_KEY: &str = "RWSasFZdc3W2IqbOY7FEsZ7MIhwqiFzs+0vpdtEZ2KqrZOUzl+YOEZ9W";
 
 /// build.rs が埋め込んだ現在のリリース tag。ローカル dev ビルドでは None。
 pub fn current_release_tag() -> Option<&'static str> {
@@ -105,6 +117,41 @@ fn validate_asset_url(url: &str) -> Result<(), String> {
     }
 }
 
+/// detached minisign 署名 (`.minisig` の中身) で `data` を検証する純ロジック。
+/// 公開鍵は `MINISIGN_PUBLIC_KEY` 固定。検証失敗 (署名不一致 / 別鍵 / 壊れた署名) は Err。
+///
+/// minisign 0.11+ の prehashed 署名を想定するので legacy (`allow_legacy=false`)。
+fn verify_minisign(data: &[u8], minisig: &str) -> Result<(), String> {
+    let pk = minisign_verify::PublicKey::from_base64(MINISIGN_PUBLIC_KEY)
+        .map_err(|e| format!("公開鍵 parse 失敗: {e}"))?;
+    let sig = minisign_verify::Signature::decode(minisig)
+        .map_err(|e| format!("署名 decode 失敗: {e}"))?;
+    pk.verify(data, &sig, false)
+        .map_err(|e| format!("署名検証失敗: {e}"))
+}
+
+/// asset (`url`) に対応する `{url}.minisig` を DL して `data` を検証する。
+/// host allowlist / https / サイズ cap は asset 本体と同じガードを通す。
+fn verify_asset_signature(agent: &ureq::Agent, asset_url: &str, data: &[u8]) -> Result<(), String> {
+    let sig_url = format!("{asset_url}.minisig");
+    validate_asset_url(&sig_url)?;
+    let resp = agent
+        .get(&sig_url)
+        .set("User-Agent", "cdp-agent-self-update")
+        .call()
+        .map_err(|e| format!(".minisig DL 失敗 (署名未添付の release か): {e}"))?;
+    let mut sig_bytes: Vec<u8> = Vec::new();
+    resp.into_reader()
+        .take(MAX_SIG_BYTES + 1)
+        .read_to_end(&mut sig_bytes)
+        .map_err(|e| e.to_string())?;
+    if sig_bytes.len() as u64 > MAX_SIG_BYTES {
+        return Err(".minisig が上限サイズを超過".into());
+    }
+    let sig_text = String::from_utf8(sig_bytes).map_err(|e| format!(".minisig が非 UTF-8: {e}"))?;
+    verify_minisign(data, &sig_text)
+}
+
 fn build_agent() -> ureq::Agent {
     ureq::builder()
         .tls_connector(Arc::new(
@@ -155,6 +202,10 @@ fn download_and_replace(agent: &ureq::Agent, url: &str) -> Result<(), String> {
     if bytes.len() as u64 > MAX_ASSET_BYTES {
         return Err("asset が上限サイズを超過".into());
     }
+
+    // 中身を一切触る前に minisign 署名を検証する。検証に通らない asset は zip を開かず破棄
+    // (= GitHub アカウント / トークン侵害で偽 asset が乗っても self_replace に進まない、#20)。
+    verify_asset_signature(agent, url, &bytes)?;
 
     let reader = std::io::Cursor::new(bytes);
     let mut zip = zip::ZipArchive::new(reader).map_err(|e| format!("zip 展開失敗: {e}"))?;
@@ -422,6 +473,58 @@ mod tests {
             ]}
         ]);
         assert!(pick_latest_extension(&releases).is_none());
+    }
+
+    // minisign 署名検証のテストベクタ。`MINISIGN_PUBLIC_KEY` (本番鍵) とは別の使い捨て
+    // テスト鍵で `TEST_PAYLOAD` を署名したもの。検証ロジックの形式互換 (prehashed,
+    // legacy=false) を pin する。本番鍵の秘密鍵はリポジトリに無いので、テストでは
+    // verify_minisign を一時的にテスト公開鍵で呼ぶ薄いヘルパ verify_with を使う。
+    const TEST_PUBKEY: &str = "RWRvjwoiICZRffaMjCQLUgyCCLC972LhEQ1qDtjOzP8sEfqedBsyXUdH";
+    const TEST_PAYLOAD: &[u8] = b"hello cdp-relay update";
+    const TEST_MINISIG: &str = "untrusted comment: signature from minisign secret key\n\
+RURvjwoiICZRfSGB5ZsAjWbmSyQFG+XsEAKhOhSNkwbZpq94YLn01gDiYRu7AYVbQjUJlNrPtrJWUZp3wwHdMNClyLKcNDxo7ws=\n\
+trusted comment: timestamp:1780898107\tfile:payload.bin\thashed\n\
+8wdBFxYcFci3jgloi3NU3FJr0APX5vPf65SZs8RMJGa4qWsrUNH9l0f1tb7qFiRzPo0vu0QX/I2jHf4vONJsDw==\n";
+
+    /// テスト用: 任意の公開鍵で検証する (verify_minisign は本番鍵固定なので、テスト鍵を
+    /// 使うためのヘルパ。本番ロジックと同じ呼び出し形 (prehashed, legacy=false) を保つ)。
+    fn verify_with(pubkey: &str, data: &[u8], minisig: &str) -> Result<(), String> {
+        let pk = minisign_verify::PublicKey::from_base64(pubkey)
+            .map_err(|e| format!("公開鍵 parse 失敗: {e}"))?;
+        let sig = minisign_verify::Signature::decode(minisig)
+            .map_err(|e| format!("署名 decode 失敗: {e}"))?;
+        pk.verify(data, &sig, false)
+            .map_err(|e| format!("署名検証失敗: {e}"))
+    }
+
+    #[test]
+    fn verify_minisign_accepts_valid_signature() {
+        assert!(verify_with(TEST_PUBKEY, TEST_PAYLOAD, TEST_MINISIG).is_ok());
+    }
+
+    #[test]
+    fn verify_minisign_rejects_tampered_data() {
+        // 1 byte でも変われば検証は失敗する。
+        let mut tampered = TEST_PAYLOAD.to_vec();
+        tampered[0] ^= 0x01;
+        assert!(verify_with(TEST_PUBKEY, &tampered, TEST_MINISIG).is_err());
+    }
+
+    #[test]
+    fn verify_minisign_rejects_wrong_public_key() {
+        // 本番鍵 (別鍵) では テスト署名は通らない = 偽 asset を弾けることの証明。
+        assert!(verify_with(MINISIGN_PUBLIC_KEY, TEST_PAYLOAD, TEST_MINISIG).is_err());
+    }
+
+    #[test]
+    fn verify_minisign_rejects_malformed_signature() {
+        assert!(verify_with(TEST_PUBKEY, TEST_PAYLOAD, "not a minisig").is_err());
+    }
+
+    #[test]
+    fn production_public_key_is_valid() {
+        // hard-code した本番公開鍵が parse 可能であること (typo 検出)。
+        assert!(minisign_verify::PublicKey::from_base64(MINISIGN_PUBLIC_KEY).is_ok());
     }
 
     #[test]
