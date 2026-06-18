@@ -156,8 +156,8 @@
       agent が古いまま browser_eval が出ない実害)。MSI が installer 権限で新 exe を
       直接叩いて manifest を貼り替えれば、この循環を断ち切れる。
 
-      `--install-native-host` は HKCU registry + manifest を書いて即 exit する
-      (server は起動しない) ので installer を block しない。perUser install なので
+      install-native-host フラグ (先頭ハイフン2つ) は HKCU registry + manifest を書いて
+      即 exit する (server は起動しない) ので installer を block しない。perUser install なので
       Impersonate='yes' で実ユーザーの HKCU に書く。登録失敗は致命にしない
       (Return='ignore')。アンインストール時 (REMOVE) は走らせない。
     -->
