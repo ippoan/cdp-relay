@@ -76,17 +76,22 @@ pub fn write_message<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
     w.flush()
 }
 
-/// 受信メッセージを応答 JSON に変換する純ロジック。probe / spawn を注入して test 可能に。
+/// 受信メッセージを応答 JSON に変換する純ロジック。probe / spawn / kill を注入して test 可能に。
 ///
-/// - `{cmd:"ping"}`  → `{ok:true, version, ext_port}`
-/// - `{cmd:"start"}` → 既に probe() 成功なら `already_running`、未起動なら spawn() して
+/// - `{cmd:"ping"}`    → `{ok:true, version, ext_port}`
+/// - `{cmd:"start"}`   → 既に probe() 成功なら `already_running`、未起動なら spawn() して
 ///   `started`。spawn 失敗は `{ok:false, error}`。
+/// - `{cmd:"restart"}` → **必ず kill() で既存 agent を落としてから** spawn() し直す。接続の
+///   たびに最新インストール版バイナリで起動するための経路 (#54 後の旧 agent 居座り対策)。
+///   kill 失敗は best-effort で握り潰し (落とすものが無いだけのことが多い)、spawn 失敗のみ
+///   `{ok:false, error}`。
 /// - その他 → `{ok:false, error:"unknown cmd"}`
 pub fn handle_request(
     req: &Value,
     port: u16,
     probe: &dyn Fn() -> bool,
     spawn: &mut dyn FnMut() -> Result<String, String>,
+    kill: &mut dyn FnMut() -> Result<String, String>,
 ) -> Value {
     let version = env!("CARGO_PKG_VERSION");
     match req.get("cmd").and_then(Value::as_str).unwrap_or("") {
@@ -101,6 +106,20 @@ pub fn handle_request(
                     }
                     Err(e) => json!({ "ok": false, "error": e }),
                 }
+            }
+        }
+        "restart" => {
+            // kill は best-effort (落とす対象が無ければ非ゼロ rc になり得るが致命ではない)。
+            let killed = match kill() {
+                Ok(d) => d,
+                Err(e) => format!("kill skipped: {e}"),
+            };
+            match spawn() {
+                Ok(detail) => json!({
+                    "ok": true, "restarted": true, "ext_port": port,
+                    "killed": killed, "detail": detail
+                }),
+                Err(e) => json!({ "ok": false, "error": e }),
             }
         }
         other => json!({ "ok": false, "error": format!("unknown cmd: {other}") }),
@@ -125,8 +144,13 @@ pub fn run_native_host() {
     loop {
         match read_message(&mut r) {
             Ok(Some(req)) => {
-                let resp =
-                    handle_request(&req, port, &|| probe_agent(port), &mut spawn_detached_agent);
+                let resp = handle_request(
+                    &req,
+                    port,
+                    &|| probe_agent(port),
+                    &mut spawn_detached_agent,
+                    &mut kill_other_agents,
+                );
                 if let Err(e) = write_message(&mut w, &resp) {
                     eprintln!("[cdp-agent] native-host write 失敗: {e}");
                     break;
@@ -171,6 +195,35 @@ fn spawn_detached_agent() -> Result<String, String> {
         .spawn()
         .map_err(|e| format!("spawn 失敗: {e}"))?;
     Ok(format!("spawned {}", exe.display()))
+}
+
+/// 自分 (native-host プロセス) 以外の cdp-agent.exe を全て kill する (Windows)。
+/// `restart` cmd で、接続のたびに居座っている旧 agent server を確実に落とすために使う。
+/// `/FI "PID ne <self>"` で native-host 自身は除外する (応答を返す前に自死しないため)。
+#[cfg(windows)]
+fn kill_other_agents() -> Result<String, String> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    use std::os::windows::process::CommandExt;
+    let self_pid = std::process::id();
+    let out = Command::new("taskkill")
+        .args([
+            "/F",
+            "/IM",
+            "cdp-agent.exe",
+            "/FI",
+            &format!("PID ne {self_pid}"),
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("taskkill 失敗: {e}"))?;
+    // taskkill は対象なしで非ゼロを返すので rc は致命扱いしない。
+    Ok(format!("taskkill rc={:?}", out.status.code()))
+}
+
+/// 非 Windows fallback (CCoW / 開発用)。kill 対象の概念が無いので no-op。
+#[cfg(not(windows))]
+fn kill_other_agents() -> Result<String, String> {
+    Ok("noop (non-windows)".to_string())
 }
 
 /// native-host manifest の JSON を生成する (OS 非依存・純関数)。`path` は exe の絶対 path。
@@ -283,6 +336,11 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
+    /// kill は呼ばれない想定のテスト用 no-op (呼ばれたら panic)。
+    fn no_kill() -> impl FnMut() -> Result<String, String> {
+        || panic!("kill は呼ばれないはず")
+    }
+
     #[test]
     fn start_when_not_running_spawns() {
         let mut spawned = false;
@@ -295,6 +353,7 @@ mod tests {
                 spawned = true;
                 Ok("spawned x".to_string())
             },
+            &mut no_kill(),
         );
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["started"], true);
@@ -310,6 +369,7 @@ mod tests {
             19222,
             &|| true, // 既に起動
             &mut || panic!("spawn は呼ばれないはず"),
+            &mut no_kill(),
         );
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["already_running"], true);
@@ -318,16 +378,76 @@ mod tests {
     #[test]
     fn start_propagates_spawn_error() {
         let req = json!({ "cmd": "start" });
-        let resp = handle_request(&req, 19222, &|| false, &mut || Err("boom".to_string()));
+        let resp = handle_request(
+            &req,
+            19222,
+            &|| false,
+            &mut || Err("boom".to_string()),
+            &mut no_kill(),
+        );
         assert_eq!(resp["ok"], false);
         assert_eq!(resp["error"], "boom");
     }
 
     #[test]
+    fn restart_kills_then_spawns_regardless_of_probe() {
+        let mut killed = false;
+        let mut spawned = false;
+        let resp = handle_request(
+            &json!({ "cmd": "restart" }),
+            19222,
+            &|| true, // probe が true (既に起動中) でも restart は kill+spawn する
+            &mut || {
+                spawned = true;
+                Ok("spawned new".to_string())
+            },
+            &mut || {
+                killed = true;
+                Ok("taskkill rc=Some(0)".to_string())
+            },
+        );
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["restarted"], true);
+        assert_eq!(resp["killed"], "taskkill rc=Some(0)");
+        assert!(killed && spawned);
+    }
+
+    #[test]
+    fn restart_swallows_kill_error_but_still_spawns() {
+        let resp = handle_request(
+            &json!({ "cmd": "restart" }),
+            19222,
+            &|| false,
+            &mut || Ok("spawned".to_string()),
+            &mut || Err("taskkill missing".to_string()),
+        );
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["restarted"], true);
+        assert!(resp["killed"].as_str().unwrap().contains("kill skipped"));
+    }
+
+    #[test]
+    fn restart_propagates_spawn_error() {
+        let resp = handle_request(
+            &json!({ "cmd": "restart" }),
+            19222,
+            &|| false,
+            &mut || Err("spawn boom".to_string()),
+            &mut || Ok("killed".to_string()),
+        );
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"], "spawn boom");
+    }
+
+    #[test]
     fn ping_returns_version_and_port() {
-        let resp = handle_request(&json!({ "cmd": "ping" }), 19222, &|| false, &mut || {
-            panic!("ping は spawn しない")
-        });
+        let resp = handle_request(
+            &json!({ "cmd": "ping" }),
+            19222,
+            &|| false,
+            &mut || panic!("ping は spawn しない"),
+            &mut no_kill(),
+        );
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["ext_port"], 19222);
         assert_eq!(resp["version"], env!("CARGO_PKG_VERSION"));
@@ -335,9 +455,13 @@ mod tests {
 
     #[test]
     fn unknown_cmd_is_error() {
-        let resp = handle_request(&json!({ "cmd": "explode" }), 19222, &|| false, &mut || {
-            panic!("unknown は spawn しない")
-        });
+        let resp = handle_request(
+            &json!({ "cmd": "explode" }),
+            19222,
+            &|| false,
+            &mut || panic!("unknown は spawn しない"),
+            &mut no_kill(),
+        );
         assert_eq!(resp["ok"], false);
         assert!(resp["error"].as_str().unwrap().contains("unknown cmd"));
     }

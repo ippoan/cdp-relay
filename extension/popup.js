@@ -94,10 +94,15 @@ async function refreshMcpUrl() {
 
 /** CCoW に貼る接続用プロンプトを組み立てる。 */
 function buildPrompt(mcp, here) {
+  // agent のビルド版 (release tag、例 cdp-agent-dev-33) を明記する。どの版が動いて
+  // いるかでツール面 (browser_eval の有無等) が変わるため、貼り先で判別できるようにする。
+  const ver = agentVer || "unknown";
   return (
     `手元 Chrome を cdp-relay 経由で操作してください。\n` +
-    `MCP エンドポイント: ${mcp}\n\n` +
-    `この MCP に対し tools/call で browser_navigate / browser_screenshot を使えます。\n` +
+    `MCP エンドポイント: ${mcp}\n` +
+    `agent version: ${ver} / 拡張 version: ${extVer}\n\n` +
+    `この MCP に対し tools/call で browser_navigate / browser_screenshot / browser_eval を使えます。\n` +
+    `(browser_eval が無ければ agent が古い → tools/list で確認)\n` +
     `まず browser_screenshot で現在の画面（${here}）を確認してから、指示に従って操作してください。\n\n` +
     `例: curl -sS -X POST ${mcp} -H 'Content-Type: application/json' \\\n` +
     `  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"browser_screenshot","arguments":{}}}'`

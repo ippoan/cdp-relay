@@ -54,11 +54,11 @@ async function pingAgent(base, timeoutMs = 1500) {
  * host は agent を detached spawn して即応答する (ランチャー)。host 未登録なら
  * lastError が立つので throw する (= 呼び出し側は手動起動を案内)。
  */
-function startAgentViaNative() {
+function sendNative(message) {
   return new Promise((resolve, reject) => {
     let settled = false;
     try {
-      chrome.runtime.sendNativeMessage(NATIVE_HOST, { cmd: "start" }, (resp) => {
+      chrome.runtime.sendNativeMessage(NATIVE_HOST, message, (resp) => {
         if (settled) return;
         settled = true;
         const err = chrome.runtime.lastError;
@@ -75,6 +75,37 @@ function startAgentViaNative() {
       }
     }
   });
+}
+
+/** host 未登録なら throw → connect() が手動起動を案内。 */
+function startAgentViaNative() {
+  return sendNative({ cmd: "start" });
+}
+
+/**
+ * 接続のたびに旧 agent を**必ず taskkill して最新インストール版で起動し直す** (#54 後の
+ * 「旧バイナリが居座って browser_eval 等の新ツールが出ない」対策)。restart を理解しない
+ * 旧バイナリ (unknown cmd) や host 未登録なら従来の start 経路に fallback する。
+ */
+async function ensureAgentFresh(base) {
+  reportStatus("starting", "agent を再起動中 (最新版で起動)…");
+  let resp = null;
+  try {
+    resp = await sendNative({ cmd: "restart" });
+  } catch {
+    resp = null; // host 未登録等 → fallback で扱う
+  }
+  // restart 非対応 (旧バイナリ unknown cmd) / host 未登録 → 従来の start (未起動なら spawn)。
+  if (!resp || resp.ok === false) {
+    await ensureAgentRunning(base);
+    return;
+  }
+  // restart 成功 (kill→spawn 済み)。新 agent が ext server を bind するまで待つ。
+  for (let i = 0; i < 20; i++) {
+    if (await pingAgent(base)) return;
+    await sleep(500);
+  }
+  throw new Error("agent restart 後に ext server へ到達できない");
 }
 
 /**
@@ -171,7 +202,8 @@ async function connectInner() {
     // agent 未起動なら Native Messaging で起動依頼する (cdp-relay#33)。
     const agentBase = cfg.relayUrl.trim().replace(/\/+$/, "");
     try {
-      await ensureAgentRunning(agentBase);
+      // 接続のたびに旧 agent を kill して最新版で起動し直す (旧バイナリ居座り対策)。
+      await ensureAgentFresh(agentBase);
     } catch (e) {
       reportStatus(
         "error",
