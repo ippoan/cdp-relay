@@ -45,6 +45,51 @@ fn extract_url(line: &str) -> Option<String> {
     }
 }
 
+/// agent が spawn した cloudflared の PID を置くファイル。restart で agent 本体を
+/// taskkill すると子 cloudflared が orphan 化するため、次回起動時にこの PID だけを
+/// 片付けて無限増殖を防ぐ (#12)。同一ユーザーの temp に置けばプロセス跨ぎで共有できる。
+fn cloudflared_pid_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("cdp-agent-cloudflared.pid")
+}
+
+/// 前回記録した cloudflared PID を (それが今も cloudflared なら) kill する。best-effort。
+/// 記録が無い / 読めない / 既に消えている場合は何もしない。PID reuse 誤爆を避けるため
+/// image-name filter を併用する。
+fn kill_stale_cloudflared() {
+    let path = cloudflared_pid_path();
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&path);
+    let Ok(pid) = s.trim().parse::<u32>() else {
+        return;
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = Command::new("taskkill")
+            .args([
+                "/F",
+                "/PID",
+                &pid.to_string(),
+                "/FI",
+                "IMAGENAME eq cloudflared.exe",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill").arg(pid.to_string()).output();
+    }
+}
+
+/// spawn した cloudflared の PID を記録する (best-effort)。
+fn record_cloudflared_pid(pid: u32) {
+    let _ = std::fs::write(cloudflared_pid_path(), pid.to_string());
+}
+
 type Router = fn(&str, &str, &str, &ExtBridge) -> HttpReply;
 
 /// tiny_http のリクエストを router に橋渡しして応答する。
@@ -256,6 +301,12 @@ fn main() {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cf_cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    // 前回 agent が残した cloudflared (= restart で本体を taskkill した際に orphan 化した子)
+    // を、記録した PID に限って kill する。これをしないと接続のたびに cloudflared が
+    // 積み上がる (#12: cloudflared 無限増殖)。他用途の cloudflared tunnel は PID も
+    // image-name filter も一致しない限り触れない。
+    kill_stale_cloudflared();
+
     let mut child = match cf_cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -266,6 +317,8 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // 次回起動時に「この cloudflared だけ」を片付けられるよう PID を記録する。
+    record_cloudflared_pid(child.id());
 
     // cloudflared はログを stderr に出す。1 行ずつ読んで URL を拾う。
     let stderr = child.stderr.take().unwrap();
