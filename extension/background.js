@@ -332,6 +332,26 @@ async function handle(method, params, cfg, mode) {
       const shotUrl = await uploadShot(bytes, cfg);
       return { shot_url: shotUrl };
     }
+    case "eval": {
+      if (typeof params.expression !== "string" || params.expression === "")
+        throw new Error("expression is required");
+      // Runtime.evaluate は returnByValue で JSON 化可能な値を直接返す。
+      // awaitPromise で式が Promise を返すケースも解決する。
+      const r = await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+        expression: params.expression,
+        returnByValue: true,
+        awaitPromise: true,
+      });
+      if (r.exceptionDetails) {
+        const ex = r.exceptionDetails;
+        throw new Error(
+          (ex.exception && (ex.exception.description || ex.exception.value)) ||
+            ex.text ||
+            "eval exception",
+        );
+      }
+      return { value: r.result ? r.result.value : null };
+    }
     default:
       throw new Error("unknown method: " + method);
   }

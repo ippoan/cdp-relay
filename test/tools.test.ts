@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import { browserNavigate, browserScreenshot, CdpToolError } from "../src/mcp/tools";
+import { browserEval, browserNavigate, browserScreenshot, CdpToolError } from "../src/mcp/tools";
 import type { Env } from "../src/env";
 
 // MCP の SDK 配線 (server.ts) は ajv の JSON-module require で workers-pool loader を
@@ -88,6 +88,21 @@ describe("MCP tools (/cmd 往復)", () => {
     res.webSocket!.accept(); // メッセージを受けても応答しない
     await new Promise((r) => setTimeout(r, 50));
     await expect(browserScreenshot(E, session)).rejects.toThrow(/cdp_timeout/);
+  });
+
+  it("browser_eval が拡張へ転送され value が返る", async () => {
+    const session = "eval-" + crypto.randomUUID();
+    await connectExtension(session, (method, params) => {
+      if (method !== "eval") throw new Error("unexpected:" + method);
+      expect(params.expression).toBe("document.title");
+      return { value: "Example Domain" };
+    });
+    const r = await browserEval(E, session, "document.title");
+    expect(r.value).toBe("Example Domain");
+  });
+
+  it("browser_eval は空 expression を弾く", async () => {
+    await expect(browserEval(E, "x", "")).rejects.toThrow(/expression is required/);
   });
 
   it("url が http(s) でなければ弾く", async () => {

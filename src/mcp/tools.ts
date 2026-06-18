@@ -129,3 +129,20 @@ export interface ScreenshotResult {
 export async function browserScreenshot(env: Env, session: string): Promise<ScreenshotResult> {
   return (await sendCommand(env, session, "screenshot", {})) as ScreenshotResult;
 }
+
+export interface EvalResult {
+  /** Runtime.evaluate の returnByValue 結果。JSON 化可能な値 (文字列/数値/object 等) か null。 */
+  value: unknown;
+}
+
+/**
+ * session の拡張に JavaScript 式を Runtime.evaluate させ、結果値を返す。
+ * text 取得は `document.body.innerText`、特定要素は querySelector の innerText 等。
+ * PNG と違い値は小さいので /shot upload はせず { value } を直接返す。
+ */
+export async function browserEval(env: Env, session: string, expression: string): Promise<EvalResult> {
+  if (typeof expression !== "string" || expression === "") {
+    throw new CdpToolError("expression is required");
+  }
+  return (await sendCommand(env, session, "eval", { expression })) as EvalResult;
+}
