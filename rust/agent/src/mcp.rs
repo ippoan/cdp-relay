@@ -58,10 +58,16 @@ pub fn handle(body: &str, sink: &dyn CommandSink) -> McpReply {
                 .pointer("/params/protocolVersion")
                 .and_then(Value::as_str)
                 .unwrap_or("2025-03-26");
+            // version は CARGO_PKG_VERSION (常に 0.0.0) ではなく build.rs が埋め込む
+            // release tag (例 cdp-agent-dev-33) を使う。どの版が動いているか = どのツール
+            // 面 (browser_eval の有無等) かを initialize だけで判別できるようにする。
             let result = json!({
                 "protocolVersion": pv,
                 "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "cdp-agent", "version": env!("CARGO_PKG_VERSION") }
+                "serverInfo": {
+                    "name": "cdp-agent",
+                    "version": crate::update::current_release_tag().unwrap_or("dev")
+                }
             });
             McpReply {
                 body: Some(result_envelope(&id, result)),
