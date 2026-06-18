@@ -2,7 +2,7 @@
 //!
 //! Streamable HTTP の `/mcp` に来る JSON-RPC を捌く純ロジック。tool の実体 (CDP) は
 //! `CommandSink` (= ExtBridge) 経由で拡張に投げる。HTTP/socket には依存しないので
-//! sink を fake にすれば unit test できる。tool 表面 (navigate / screenshot) は現行
+//! sink を fake にすれば unit test できる。tool 表面 (navigate / screenshot / eval) は現行
 //! worker 版 (`src/mcp/tools.ts`) に合わせる。
 
 use crate::extbridge::CommandSink;
@@ -103,6 +103,17 @@ fn tools_list() -> Value {
                 "name": "browser_screenshot",
                 "description": "手元 Chrome の viewport を撮影し PNG を返す。",
                 "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "browser_eval",
+                "description": "手元 Chrome の現在ページで JavaScript 式を評価し結果を返す。\
+    text 取得は `document.body.innerText`、特定要素は `document.querySelector('sel').innerText` 等。\
+    返り値は文字列ならそのまま、それ以外は JSON 文字列化して text content で返す。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "expression": { "type": "string", "description": "評価する JavaScript 式" } },
+                    "required": ["expression"]
+                }
             }
         ]
     })
@@ -143,6 +154,24 @@ fn tools_call(id: &Value, req: &Value, sink: &dyn CommandSink) -> String {
                             ]
                         }),
                     )
+                }
+                Err(e) => error_envelope(id, -32000, &e),
+            }
+        }
+        "browser_eval" => {
+            let expr = args.get("expression").and_then(Value::as_str).unwrap_or("");
+            if expr.is_empty() {
+                return error_envelope(id, -32602, "expression is required");
+            }
+            // 拡張が Runtime.evaluate (returnByValue) した結果 { value } を text content で返す。
+            match sink.send("eval", json!({ "expression": expr })) {
+                Ok(v) => {
+                    let value = v.get("value").cloned().unwrap_or(Value::Null);
+                    let text = match value {
+                        Value::String(s) => s,
+                        other => other.to_string(),
+                    };
+                    result_envelope(id, tool_text(&text))
                 }
                 Err(e) => error_envelope(id, -32000, &e),
             }
@@ -220,7 +249,67 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["browser_navigate", "browser_screenshot"]);
+        assert_eq!(
+            names,
+            ["browser_navigate", "browser_screenshot", "browser_eval"]
+        );
+    }
+
+    #[test]
+    fn eval_returns_string_value_as_text() {
+        let r = handle(
+            r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"browser_eval","arguments":{"expression":"document.title"}}}"#,
+            &FakeSink(Ok(json!({ "value": "Example Domain" }))),
+        );
+        let v = parse(r.body.as_deref().unwrap());
+        assert_eq!(v["result"]["content"][0]["type"], "text");
+        assert_eq!(v["result"]["content"][0]["text"], "Example Domain");
+    }
+
+    #[test]
+    fn eval_stringifies_non_string_value() {
+        // 数値や object は JSON 文字列化して返す (other => to_string 経路)。
+        let r = handle(
+            r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"browser_eval","arguments":{"expression":"1+2"}}}"#,
+            &FakeSink(Ok(json!({ "value": 3 }))),
+        );
+        let v = parse(r.body.as_deref().unwrap());
+        assert_eq!(v["result"]["content"][0]["text"], "3");
+    }
+
+    #[test]
+    fn eval_missing_value_becomes_null_text() {
+        // value 欠落時は Value::Null → "null" (unwrap_or(Null) 経路)。
+        let r = handle(
+            r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"browser_eval","arguments":{"expression":"void 0"}}}"#,
+            &FakeSink(Ok(json!({}))),
+        );
+        let v = parse(r.body.as_deref().unwrap());
+        assert_eq!(v["result"]["content"][0]["text"], "null");
+    }
+
+    #[test]
+    fn eval_rejects_empty_expression_without_calling_sink() {
+        let r = handle(
+            r#"{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"browser_eval","arguments":{"expression":""}}}"#,
+            &FakeSink(Err("should not be called".into())),
+        );
+        let v = parse(r.body.as_deref().unwrap());
+        assert_eq!(v["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn eval_error_propagates_as_jsonrpc_error() {
+        let r = handle(
+            r#"{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"browser_eval","arguments":{"expression":"throw 1"}}}"#,
+            &FakeSink(Err("eval exception".into())),
+        );
+        let v = parse(r.body.as_deref().unwrap());
+        assert_eq!(v["error"]["code"], -32000);
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("eval exception"));
     }
 
     #[test]

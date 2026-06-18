@@ -34,14 +34,14 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
    └ /shot/{session}/{id} … screenshot 一時配信
    ▲
    │ (2) tool 呼び出し → DO を session で引いて /cmd
-[CCoW / Claude Code]  MCP: browser_navigate / browser_screenshot
+[CCoW / Claude Code]  MCP: browser_navigate / browser_screenshot / browser_eval
 ```
 
 ## エンドポイント
 
 | メソッド / パス | 役割 |
 |---|---|
-| `POST /mcp` | MCP ツール (`browser_navigate` / `browser_screenshot`)。**MCP-JWT 認証** (ref-files と同方式) |
+| `POST /mcp` | MCP ツール (`browser_navigate` / `browser_screenshot` / `browser_eval`)。**MCP-JWT 認証** (ref-files と同方式) |
 | `GET /ext/{session}` | 拡張の WS upgrade。`?token=` 必須 (hibernatable hold) |
 | `PUT /shot/{session}` | 拡張が screenshot(PNG) を投入。token 必須。`{ shot_url }` を返す |
 | `GET /shot/{session}/{id}` | screenshot 一時配信 (予測不能 id ゆえ token 不要、TTL 既定 5 分) |
@@ -76,6 +76,7 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
   を人手で調べる代わりに、Claude が code を発行して手元に渡す (下記 *pair flow* 参照)
 - `browser_navigate(session, url)` — 手元 Chrome を url に遷移 (http(s) のみ)。`{ url }` を返す
 - `browser_screenshot(session)` — viewport を撮って `{ shot_url }` を返す
+- `browser_eval(session, expression)` — 現在ページで JS 式を評価し `{ value }` を返す。text 取得は `document.body.innerText` 等 (PNG と違い値が小さいので shot_url ではなく値を直接返す)
 
 > 設計判断 (なぜ stateless + 自前 DO で durable McpAgent でないか): tool セットは固定なので
 > `listChanged` 不要。durable の `McpAgent` は WS transport を内部で握るため「拡張用の別 WS

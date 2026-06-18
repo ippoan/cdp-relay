@@ -17,7 +17,7 @@ Cloudflare Worker+DO + stateless MCP)。
 |---|---|
 | `src/index.ts` | Worker エントリ。token 検証 + session (idFromName) で DO へ振り分け |
 | `src/do/browser-session-do.ts` | `BrowserSessionDO`。拡張 WS hold + `/cmd` 往復 + `/shot` 保存配信 |
-| `src/mcp/tools.ts` | MCP ツールの純粋ロジック (`browser_navigate` / `browser_screenshot`) |
+| `src/mcp/tools.ts` | MCP ツールの純粋ロジック (`browser_navigate` / `browser_screenshot` / `browser_eval`) |
 | `src/mcp/server.ts` | `createWorkerMcp` 配線 (`/mcp` 到達時のみ遅延 import) |
 | `src/lib/auth.ts` | `RELAY_TOKEN` の constant-time 検証 |
 | `src/env.ts` | binding + 設定値 (vars から数値化) |

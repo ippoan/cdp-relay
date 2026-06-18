@@ -8,6 +8,7 @@
  * 提供ツール:
  *   - browser_navigate(session, url) … 手元 Chrome を url に遷移させる
  *   - browser_screenshot(session)    … viewport を撮って shot_url を返す
+ *   - browser_eval(session, expression) … JS 式を評価して値 (text/DOM 等) を返す
  *
  * 設計判断 (なぜ stateless + 自前 DO で durable McpAgent ではないか): tool セットは
  * 固定なので listChanged 不要。durable の McpAgent は WS transport を内部で握るため
@@ -19,7 +20,7 @@
 import { createWorkerMcp } from "@ippoan/mcp-cf-workers";
 import { z } from "zod";
 import type { Env } from "../env";
-import { browserNavigate, browserPair, browserScreenshot, CdpToolError } from "./tools";
+import { browserEval, browserNavigate, browserPair, browserScreenshot, CdpToolError } from "./tools";
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
@@ -100,6 +101,28 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
         async ({ session }: { session: string }) => {
           try {
             return ok(await browserScreenshot(env, session));
+          } catch (e) {
+            return fail(e);
+          }
+        },
+      );
+
+      server.registerTool(
+        "browser_eval",
+        {
+          description:
+            "手元 Chrome の現在ページで JavaScript 式を評価し結果値を返す。" +
+            "text 取得は `document.body.innerText`、特定要素は `document.querySelector('sel')?.innerText` 等。" +
+            "PNG と違い値は小さいので shot_url ではなく { value } を直接返す。" +
+            "拡張が未接続なら extension_not_connected エラー。",
+          inputSchema: {
+            session: z.string().describe("拡張接続の session 名"),
+            expression: z.string().describe("評価する JavaScript 式"),
+          },
+        },
+        async ({ session, expression }: { session: string; expression: string }) => {
+          try {
+            return ok(await browserEval(env, session, expression));
           } catch (e) {
             return fail(e);
           }
