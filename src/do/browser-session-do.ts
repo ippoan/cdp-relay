@@ -34,6 +34,13 @@ interface Pending {
 /** pairing code TTL の上限 (秒)。tool が過大な ttl_seconds を渡しても clamp する。 */
 const MAX_PAIR_TTL_SECONDS = 86_400;
 
+/**
+ * stash 1 件の最大 byte 数。eval 結果が過大に膨れて DO storage / SQLite row を
+ * 圧迫しないよう上限を設ける。用途は「context に載せたくない text/base64 dump の回収」
+ * なので 1 MiB あれば十分 (screenshot ~200KB 程度も収まる)。超過は 413 で reject。
+ */
+const MAX_STASH_BYTES = 1024 * 1024;
+
 /** 32 byte (256-bit) の高エントロピー hex を返す (pairing code 用)。 */
 function randomCode(): string {
   const b = crypto.getRandomValues(new Uint8Array(32));
@@ -91,6 +98,10 @@ export class BrowserSessionDO {
     // MCP tool → CDP コマンド投入 (internal、edge では公開しない)。
     if (path.endsWith("/cmd") && req.method === "POST") {
       return this.handleCmd(req);
+    }
+    // MCP browser_stash → eval 結果を shots に保存して id を返す (internal、edge 非公開)。
+    if (path.endsWith("/stash") && req.method === "POST") {
+      return this.handleStash(req);
     }
     // browser_pair tool → 短命 pairing code を mint (internal、edge では公開しない)。
     if (path.endsWith("/pair") && req.method === "POST") {
@@ -250,39 +261,111 @@ export class BrowserSessionDO {
     }
     const params = body.params ?? {};
 
-    const id = this.nextId++;
-    const timeoutMs = settings(this.env).cmdTimeoutMs;
-
     try {
-      const result = await new Promise<unknown>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          this.pending.delete(id);
-          reject(new Error("cdp_timeout"));
-        }, timeoutMs);
-        this.pending.set(id, {
-          resolve: (v) => {
-            clearTimeout(timer);
-            resolve(v);
-          },
-          reject: (e) => {
-            clearTimeout(timer);
-            reject(e);
-          },
-        });
-        try {
-          ws.send(JSON.stringify({ id, method, params }));
-        } catch {
-          clearTimeout(timer);
-          this.pending.delete(id);
-          reject(new Error("ws_send_failed"));
-        }
-      });
+      const result = await this.cmdRoundtrip(ws, method, params);
       return json({ ok: true, result });
     } catch (e) {
       const msg = (e as Error).message;
       const status = msg === "cdp_timeout" ? 504 : 502;
       return json({ error: msg }, status);
     }
+  }
+
+  /**
+   * 拡張 WS へ {id, method, params} を投げ、id 相関で result を待つ 1 往復。
+   * handleCmd / handleStash が共有する。timeout は "cdp_timeout"、send 失敗は
+   * "ws_send_failed" を throw する (呼び出し側が status code にマップする)。
+   */
+  private cmdRoundtrip(ws: WebSocket, method: string, params: unknown): Promise<unknown> {
+    const id = this.nextId++;
+    const timeoutMs = settings(this.env).cmdTimeoutMs;
+    return new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error("cdp_timeout"));
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
+      try {
+        ws.send(JSON.stringify({ id, method, params }));
+      } catch {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new Error("ws_send_failed"));
+      }
+    });
+  }
+
+  // ─── MCP browser_stash → eval 結果を一時保存 (大きな値の curl 回収用) ──────────
+
+  /**
+   * eval を 1 往復し、結果文字列を shots テーブルに保存して id を返す。
+   * 大きな eval 結果 (例: localStorage dump) を MCP body / Claude の context に載せず、
+   * `curl <stash_url>` でコンテナへ直接落とすための経路。保存先は screenshot と同じ
+   * shots テーブル / 同じ `/shot/{session}/{id}` GET で取れる (TTL も共通)。
+   * 拡張側は変更不要 — eval 結果は /cmd と同様に DO を通って返るので、ここで横取りする。
+   */
+  private async handleStash(req: Request): Promise<Response> {
+    const ws = this.ctx.getWebSockets()[0];
+    if (!ws) return json({ error: "extension_not_connected" }, 503);
+
+    let body: { expression?: unknown; content_type?: unknown };
+    try {
+      body = (await req.json()) as typeof body;
+    } catch {
+      return json({ error: "bad_request" }, 400);
+    }
+    const expression = body.expression;
+    if (typeof expression !== "string" || expression === "") {
+      return json({ error: "expression_required" }, 400);
+    }
+    const contentType =
+      typeof body.content_type === "string" && body.content_type !== ""
+        ? body.content_type
+        : "text/plain; charset=utf-8";
+
+    let result: unknown;
+    try {
+      result = await this.cmdRoundtrip(ws, "eval", { expression });
+    } catch (e) {
+      const msg = (e as Error).message;
+      return json({ error: msg }, msg === "cdp_timeout" ? 504 : 502);
+    }
+
+    // 拡張の eval は { value } を返す。文字列はそのまま、object 等は JSON 文字列化して保存。
+    const value =
+      result && typeof result === "object" && "value" in (result as Record<string, unknown>)
+        ? (result as { value: unknown }).value
+        : result;
+    const payload = typeof value === "string" ? value : JSON.stringify(value ?? null);
+    const bytes = new TextEncoder().encode(payload);
+    if (bytes.length === 0) return json({ error: "empty_value" }, 400);
+    if (bytes.length > MAX_STASH_BYTES) {
+      return json({ error: "stash_too_large", size_bytes: bytes.length }, 413);
+    }
+
+    const now = Date.now();
+    const ttlMs = settings(this.env).shotTtlSeconds * 1000;
+    this.sql.exec("DELETE FROM shots WHERE created_at < ?", now - ttlMs);
+    const id = crypto.randomUUID();
+    this.sql.exec(
+      "INSERT INTO shots(id, created_at, content_type, bytes) VALUES (?, ?, ?, ?)",
+      id,
+      now,
+      contentType,
+      bytes,
+    );
+    // stash_url は呼び出し側 (tool) が relayOrigin で組む (RELAY_ORIGIN="" だと内部
+    // origin になり公開不可なため、ここでは id だけ返す)。
+    return json({ id, content_type: contentType, size_bytes: bytes.length });
   }
 
   // ─── WS hibernation lifecycle ───────────────────────────────────────────────

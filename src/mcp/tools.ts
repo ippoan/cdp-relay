@@ -20,6 +20,7 @@ export class CdpToolError extends Error {
 /** DO 内部 endpoint は実際の host を使わない (idFromName で stub を引くため固定で良い)。 */
 const DO_CMD_URL = "https://cdp-relay.internal/cmd";
 const DO_PAIR_URL = "https://cdp-relay.internal/pair";
+const DO_STASH_URL = "https://cdp-relay.internal/stash";
 
 /** RELAY_ORIGIN を公開 origin に正規化する (空なら本番 custom domain)。 */
 function relayOrigin(env: Env): string {
@@ -145,4 +146,59 @@ export async function browserEval(env: Env, session: string, expression: string)
     throw new CdpToolError("expression is required");
   }
   return (await sendCommand(env, session, "eval", { expression })) as EvalResult;
+}
+
+export interface StashResult {
+  /** eval 結果を保存した一時 URL。`curl -o out.txt <stash_url>` で回収する (短命・無認証)。 */
+  stash_url: string;
+  /** 保存した byte 数。 */
+  size_bytes: number;
+  /** 保存時の Content-Type。 */
+  content_type: string;
+}
+
+/**
+ * session の拡張で JS 式を評価し、結果文字列を DO に保存して回収用 URL を返す。
+ * browser_eval と違い結果値そのものは MCP body に載せない。localStorage dump など
+ * 大きな値を Claude の context を経由させずに `curl` でコンテナへ落とすための経路
+ * (context に載せて Write で書き戻すと長大な base64 を逐語再生できず壊れるため)。
+ * 取得は `curl -o /tmp/out.txt <stash_url>` (screenshot と同じく短命 / 無認証 / 予測不能 id)。
+ * stash_url の組み立ては DO ではなくここで行う (RELAY_ORIGIN="" 時に DO の内部 origin を
+ * 避けるため、公開 origin = relayOrigin(env) で組む)。
+ */
+export async function browserStash(
+  env: Env,
+  session: string,
+  expression: string,
+  contentType?: string,
+): Promise<StashResult> {
+  if (typeof session !== "string" || session === "") {
+    throw new CdpToolError("session is required");
+  }
+  if (typeof expression !== "string" || expression === "") {
+    throw new CdpToolError("expression is required");
+  }
+  const id = env.BROWSER_DO.idFromName(session);
+  const stub = env.BROWSER_DO.get(id);
+  const reqBody: Record<string, unknown> = { expression };
+  if (typeof contentType === "string" && contentType !== "") reqBody.content_type = contentType;
+  const res = await stub.fetch(DO_STASH_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(reqBody),
+  });
+  const body = (await res.json()) as {
+    id?: string;
+    size_bytes?: number;
+    content_type?: string;
+    error?: string;
+  };
+  if (!res.ok || !body.id) {
+    throw new CdpToolError(body.error ?? `stash_failed_${res.status}`);
+  }
+  return {
+    stash_url: `${relayOrigin(env)}/shot/${encodeURIComponent(session)}/${body.id}`,
+    size_bytes: body.size_bytes ?? 0,
+    content_type: body.content_type ?? "text/plain; charset=utf-8",
+  };
 }
