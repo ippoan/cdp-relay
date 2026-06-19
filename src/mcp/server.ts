@@ -9,6 +9,7 @@
  *   - browser_navigate(session, url) … 手元 Chrome を url に遷移させる
  *   - browser_screenshot(session)    … viewport を撮って shot_url を返す
  *   - browser_eval(session, expression) … JS 式を評価して値 (text/DOM 等) を返す
+ *   - browser_stash(session, expression) … JS 式の結果を保存し回収用 stash_url を返す
  *
  * 設計判断 (なぜ stateless + 自前 DO で durable McpAgent ではないか): tool セットは
  * 固定なので listChanged 不要。durable の McpAgent は WS transport を内部で握るため
@@ -20,7 +21,14 @@
 import { createWorkerMcp } from "@ippoan/mcp-cf-workers";
 import { z } from "zod";
 import type { Env } from "../env";
-import { browserEval, browserNavigate, browserPair, browserScreenshot, CdpToolError } from "./tools";
+import {
+  browserEval,
+  browserNavigate,
+  browserPair,
+  browserScreenshot,
+  browserStash,
+  CdpToolError,
+} from "./tools";
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
@@ -123,6 +131,43 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
         async ({ session, expression }: { session: string; expression: string }) => {
           try {
             return ok(await browserEval(env, session, expression));
+          } catch (e) {
+            return fail(e);
+          }
+        },
+      );
+
+      server.registerTool(
+        "browser_stash",
+        {
+          description:
+            "手元 Chrome で JavaScript 式を評価し、結果 (文字列) を一時保存して回収用 URL を返す。" +
+            "browser_eval と違い結果値を MCP body に載せないので、localStorage dump や gzip+base64 等の " +
+            "大きな値を Claude の context を経由させず `curl -o /tmp/out.txt <stash_url>` でコンテナに落とせる " +
+            "(context 経由 + Write だと長大な base64 を逐語再生できず壊れる)。stash_url は短命 (既定 5 分) / " +
+            "無認証 (予測不能 id)。文字列以外を返す式は JSON 文字列化して保存する。拡張未接続なら extension_not_connected。",
+          inputSchema: {
+            session: z.string().describe("拡張接続の session 名"),
+            expression: z
+              .string()
+              .describe("評価する JavaScript 式 (大きな文字列/JSON を返すこと)"),
+            content_type: z
+              .string()
+              .optional()
+              .describe("保存時の Content-Type (既定 text/plain; charset=utf-8)"),
+          },
+        },
+        async ({
+          session,
+          expression,
+          content_type,
+        }: {
+          session: string;
+          expression: string;
+          content_type?: string;
+        }) => {
+          try {
+            return ok(await browserStash(env, session, expression, content_type));
           } catch (e) {
             return fail(e);
           }

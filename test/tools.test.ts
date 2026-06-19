@@ -1,6 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import { browserEval, browserNavigate, browserScreenshot, CdpToolError } from "../src/mcp/tools";
+import {
+  browserEval,
+  browserNavigate,
+  browserScreenshot,
+  browserStash,
+  CdpToolError,
+} from "../src/mcp/tools";
 import type { Env } from "../src/env";
 
 // MCP の SDK 配線 (server.ts) は ajv の JSON-module require で workers-pool loader を
@@ -103,6 +109,51 @@ describe("MCP tools (/cmd 往復)", () => {
 
   it("browser_eval は空 expression を弾く", async () => {
     await expect(browserEval(E, "x", "")).rejects.toThrow(/expression is required/);
+  });
+
+  it("browser_stash が eval 結果を保存し stash_url で回収できる (大きな文字列)", async () => {
+    const session = "stash-" + crypto.randomUUID();
+    // MCP body に載せたくない想定の大きめ文字列 (例: gzip+base64 dump)。
+    const payload = "ABCDEFGHIJ".repeat(6000); // 60,000 bytes
+    await connectExtension(session, (method, params) => {
+      if (method !== "eval") throw new Error("unexpected:" + method);
+      expect(params.expression).toBe("window.__big");
+      return { value: payload };
+    });
+    const r = await browserStash(E, session, "window.__big");
+    expect(r.size_bytes).toBe(payload.length);
+    // stash_url は relayOrigin(env) (= test binding https://cdp-relay.test) で組まれ、
+    // screenshot と同じ /shot/{session}/{id} 経路で回収できる。
+    expect(r.stash_url).toBe(
+      `https://cdp-relay.test/shot/${session}/${r.stash_url.split("/").pop()}`,
+    );
+    const got = await SELF.fetch(r.stash_url);
+    expect(got.status).toBe(200);
+    expect(await got.text()).toBe(payload);
+  });
+
+  it("browser_stash は object 値を JSON 文字列化して保存する (content_type 指定)", async () => {
+    const session = "stashobj-" + crypto.randomUUID();
+    await connectExtension(session, (method) => {
+      if (method !== "eval") throw new Error("unexpected");
+      return { value: { a: 1, b: "two" } };
+    });
+    const r = await browserStash(E, session, "({a:1,b:'two'})", "application/json");
+    expect(r.content_type).toBe("application/json");
+    const got = await SELF.fetch(r.stash_url);
+    expect(got.headers.get("content-type")).toBe("application/json");
+    expect(JSON.parse(await got.text())).toEqual({ a: 1, b: "two" });
+  });
+
+  it("browser_stash は拡張未接続で extension_not_connected", async () => {
+    await expect(browserStash(E, "noext-" + crypto.randomUUID(), "1")).rejects.toThrow(
+      /extension_not_connected/,
+    );
+  });
+
+  it("browser_stash は空 expression / session を弾く", async () => {
+    await expect(browserStash(E, "x", "")).rejects.toThrow(/expression is required/);
+    await expect(browserStash(E, "", "1")).rejects.toThrow(/session is required/);
   });
 
   it("url が http(s) でなければ弾く", async () => {
