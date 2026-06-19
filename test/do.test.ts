@@ -74,6 +74,9 @@ describe("screenshot 一時保存 / 配信 (/shot)", () => {
     expect(got.status).toBe(200);
     expect(got.headers.get("content-type")).toBe("image/png");
     expect(got.headers.get("x-content-type-options")).toBe("nosniff");
+    // defense-in-depth: 常に download 扱い + CSP で active 配信を封じる。
+    expect(got.headers.get("content-disposition")).toBe("attachment");
+    expect(got.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
     expect(new Uint8Array(await got.arrayBuffer())).toEqual(PNG);
   });
 
