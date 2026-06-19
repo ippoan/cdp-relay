@@ -57,8 +57,13 @@ async function restore() {
   // agent / WS mode に応じて session/token の表示を切り替える。
   toggleModeFields();
 
-  // MCP URL を先読みしておく (クリック時は await を挟まず同期コピーできるように)。
-  refreshMcpUrl();
+  // 既に溜まっている debug ログを取り出してパネルに描画する。
+  loadLogs();
+
+  // MCP URL を先読みして接続用プロンプトを textarea に出しておく
+  // (クリック時は await を挟まず同期コピーでき、かつ手動コピーの保険になる)。
+  await refreshMcpUrl();
+  prefillPrompt();
 }
 
 function setStatus(text, cls) {
@@ -109,32 +114,88 @@ function buildPrompt(mcp, here) {
   );
 }
 
-/** textarea に出して全選択する (手動コピーの保険、常に表示)。 */
+/** 接続用プロンプトを textarea に出しておく (常時表示・手動コピーの保険)。 */
 function showPrompt(text) {
-  const ta = $("promptOut");
-  ta.value = text;
-  ta.style.display = "block";
-  ta.focus();
-  ta.select();
+  $("promptOut").value = text;
+}
+
+/** 先読み済み MCP URL から接続用プロンプトを textarea に prefill する。 */
+function prefillPrompt() {
+  if (!cachedMcpUrl) return;
+  showPrompt(buildPrompt(cachedMcpUrl, activeTabUrl || "(現在のタブ)"));
 }
 
 /**
- * gesture を保ったまま同期的にコピーする。textarea を選択して execCommand('copy')
- * を使う (popup でも確実)。併せて clipboard API も fire-and-forget で試す。
- * 戻り値は execCommand の成否 (false でも textarea から手動コピー可)。
+ * gesture を保ったまま同期コピーする汎用ヘルパ。一時 textarea を選択して
+ * execCommand('copy') を使う (MV3 popup でも確実)。併せて clipboard API も
+ * fire-and-forget で試す。戻り値は execCommand の成否 (false でも枠から手動コピー可)。
  */
-function copyTextSync(text) {
-  showPrompt(text);
+function copyToClipboard(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.top = "-1000px";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
   let ok = false;
   try {
     ok = document.execCommand("copy");
   } catch {
     ok = false;
   }
+  document.body.removeChild(ta);
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).catch(() => {});
   }
   return ok;
+}
+
+// ─── debug ログパネル ───────────────────────────────────────────────────────
+function fmtTime(t) {
+  const d = new Date(t);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/** 1 エントリを #log に追記し、最下部に居たらスクロール追従する。 */
+function appendLog(entry) {
+  const box = $("log");
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 4;
+  const line = document.createElement("div");
+  line.className = "line";
+  const ts = document.createElement("span");
+  ts.className = "t";
+  ts.textContent = fmtTime(entry.t) + " ";
+  const msg = document.createElement("span");
+  if (/error|fail|失敗/i.test(entry.msg)) msg.className = "e";
+  msg.textContent = entry.msg; // textContent で描画 (XSS 回避)
+  line.appendChild(ts);
+  line.appendChild(msg);
+  box.appendChild(line);
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+/** 全ログを描画し直す。 */
+function renderLogs(logs) {
+  const box = $("log");
+  box.textContent = "";
+  for (const e of logs) appendLog(e);
+  box.scrollTop = box.scrollHeight;
+}
+
+/** background が保持する現行ログを取り出して描画する。 */
+async function loadLogs() {
+  const r = await chrome.runtime.sendMessage({ type: "cdp-relay-getlogs" }).catch(() => null);
+  if (r && r.logs) renderLogs(r.logs);
+}
+
+/** 表示中のログを 1 テキストにまとめる (コピー用)。 */
+function logsToText() {
+  return Array.from($("log").querySelectorAll(".line"))
+    .map((l) => l.textContent)
+    .join("\n");
 }
 
 // Relay URL を変えたら mode 表示を更新し、MCP URL も取り直す。
@@ -176,10 +237,15 @@ $("reload").addEventListener("click", () => {
 // 未取得なら取りに行き、textarea に出して手動コピーに倒す (gesture が切れるため)。
 $("copyPrompt").addEventListener("click", async () => {
   const here = activeTabUrl || "(現在のタブ)";
+  // 先読み済み MCP URL があれば gesture を保ったまま即コピー。
   if (cachedMcpUrl) {
-    const ok = copyTextSync(buildPrompt(cachedMcpUrl, here));
+    const text = buildPrompt(cachedMcpUrl, here);
+    showPrompt(text);
+    const ok = copyToClipboard(text);
     setStatus(
-      ok ? "接続用プロンプトをコピーしました（CCoW に貼り付け）" : "下の枠から手動でコピーしてください",
+      ok
+        ? "接続用プロンプトをコピーしました（CCoW に貼り付け）"
+        : "コピー拒否。下の枠をクリック → Ctrl+C でコピーしてください",
       ok ? "ok" : "err",
     );
     return;
@@ -190,8 +256,29 @@ $("copyPrompt").addEventListener("click", async () => {
     setStatus("MCP URL 未確定（agent が tunnel を張るまで数秒待って再度）", "err");
     return;
   }
-  showPrompt(buildPrompt(mcp, here));
-  setStatus("下の枠に表示しました。Ctrl+C で手動コピーしてください", "ok");
+  const text = buildPrompt(mcp, here);
+  showPrompt(text);
+  setStatus("下の枠をクリック → Ctrl+C でコピーしてください", "ok");
+});
+
+// 接続用プロンプト枠はクリックで全選択 (手動コピーを 1 操作で)。
+$("promptOut").addEventListener("click", () => $("promptOut").select());
+
+// debug ログのコピー / クリア。
+$("copyLog").addEventListener("click", () => {
+  const text = logsToText();
+  if (!text) {
+    setStatus("ログが空です", "err");
+    return;
+  }
+  const ok = copyToClipboard(text);
+  setStatus(ok ? "ログをコピーしました" : "コピー拒否（ログ枠を選択して Ctrl+C）", ok ? "ok" : "err");
+});
+
+$("clearLog").addEventListener("click", async () => {
+  await chrome.runtime.sendMessage({ type: "cdp-relay-clearlogs" }).catch(() => {});
+  $("log").textContent = "";
+  setStatus("ログをクリアしました");
 });
 
 // background からの状態通知。
@@ -199,6 +286,9 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "cdp-relay-status") {
     const cls = msg.state === "connected" ? "ok" : msg.state === "error" ? "err" : "";
     setStatus(`${msg.state}: ${msg.detail || ""}`, cls);
+  }
+  if (msg && msg.type === "cdp-relay-log" && msg.entry) {
+    appendLog(msg.entry);
   }
 });
 

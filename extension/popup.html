@@ -3,46 +3,78 @@
   <head>
     <meta charset="utf-8" />
     <style>
-      body { width: 320px; font: 13px/1.5 system-ui, sans-serif; margin: 0; padding: 12px; }
+      body { width: 680px; font: 13px/1.5 system-ui, sans-serif; margin: 0; padding: 12px; }
       h1 { font-size: 14px; margin: 0 0 8px; }
       #ver { font-weight: normal; font-size: 11px; color: #888; }
       label { display: block; margin: 6px 0 2px; font-weight: 600; }
       input, select { width: 100%; box-sizing: border-box; padding: 4px 6px; }
       .row { margin-bottom: 6px; }
       .btns { display: flex; gap: 8px; margin-top: 10px; }
-      button { flex: 1; padding: 6px; cursor: pointer; }
+      .btns button { flex: 1; padding: 6px; cursor: pointer; }
+      button { cursor: pointer; }
       #status { margin-top: 10px; padding: 6px; border-radius: 4px; background: #8881; font-size: 12px; word-break: break-all; }
-      #promptOut { display: none; width: 100%; height: 96px; margin-top: 6px; box-sizing: border-box; font: 11px/1.4 ui-monospace, monospace; }
+      #promptOut { width: 100%; height: 110px; margin-top: 6px; box-sizing: border-box; font: 11px/1.4 ui-monospace, monospace; }
       .ok { color: #00875a; }
       .err { color: #c9372c; }
+
+      /* 2 カラム: 左=操作、右=debug ログ。 */
+      .wrap { display: flex; gap: 12px; align-items: stretch; }
+      .col-left { width: 320px; flex: none; }
+      .col-right { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+      .loghead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+      .loghead .title { font-weight: 600; }
+      .loghead button { padding: 2px 8px; font-size: 11px; margin-left: 4px; }
+      #log {
+        flex: 1; height: 360px; overflow: auto; box-sizing: border-box; padding: 6px;
+        border-radius: 4px; background: #111; color: #ddd;
+        font: 11px/1.45 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all;
+      }
+      #log .line { padding: 0; }
+      #log .t { color: #6aa3ff; }
+      #log .e { color: #ff7b72; }
     </style>
   </head>
   <body>
     <h1>cdp-relay <span id="ver"></span></h1>
-    <div class="row">
-      <label for="relayUrl">Relay URL</label>
-      <input id="relayUrl" placeholder="https://cdp-relay.ippoan.org または http://127.0.0.1:PORT" />
+    <div class="wrap">
+      <div class="col-left">
+        <div class="row">
+          <label for="relayUrl">Relay URL</label>
+          <input id="relayUrl" placeholder="https://cdp-relay.ippoan.org または http://127.0.0.1:PORT" />
+        </div>
+        <div class="row" id="sessionRow">
+          <label for="session">Session</label>
+          <input id="session" placeholder="my-laptop (WS mode のみ)" />
+        </div>
+        <div class="row" id="tokenRow">
+          <label for="token">Token</label>
+          <input id="token" type="password" placeholder="pair token (WS mode のみ)" />
+        </div>
+        <div class="row">
+          <label for="tab">対象タブ</label>
+          <select id="tab"></select>
+        </div>
+        <div class="btns">
+          <button id="connect">接続</button>
+          <button id="disconnect">切断</button>
+        </div>
+        <button id="reload" style="width: 100%; margin-top: 6px;">更新（拡張を再読込）</button>
+        <button id="copyPrompt" style="width: 100%; margin-top: 6px;">接続用プロンプトをコピー</button>
+        <div id="status">未接続</div>
+        <textarea id="promptOut" readonly placeholder="接続用プロンプト（クリックで全選択 → Ctrl+C でも可）"></textarea>
+      </div>
+
+      <div class="col-right">
+        <div class="loghead">
+          <span class="title">debug ログ</span>
+          <span>
+            <button id="copyLog">コピー</button>
+            <button id="clearLog">クリア</button>
+          </span>
+        </div>
+        <div id="log"></div>
+      </div>
     </div>
-    <div class="row" id="sessionRow">
-      <label for="session">Session</label>
-      <input id="session" placeholder="my-laptop (WS mode のみ)" />
-    </div>
-    <div class="row" id="tokenRow">
-      <label for="token">Token</label>
-      <input id="token" type="password" placeholder="pair token (WS mode のみ)" />
-    </div>
-    <div class="row">
-      <label for="tab">対象タブ</label>
-      <select id="tab"></select>
-    </div>
-    <div class="btns">
-      <button id="connect">接続</button>
-      <button id="disconnect">切断</button>
-    </div>
-    <button id="reload" style="width: 100%; margin-top: 6px;">更新（拡張を再読込）</button>
-    <button id="copyPrompt" style="width: 100%; margin-top: 6px;">接続用プロンプトをコピー</button>
-    <div id="status">未接続</div>
-    <textarea id="promptOut" readonly placeholder="接続用プロンプト（自動コピー不可時はここから Ctrl+C）"></textarea>
     <script src="popup.js"></script>
   </body>
 </html>
