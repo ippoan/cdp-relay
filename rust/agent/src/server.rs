@@ -116,6 +116,19 @@ fn handle_ext_with_poll_timeout(
             Ok(()) => HttpReply::json(200, "{\"ok\":true}".to_string()),
             Err(e) => HttpReply::json(400, format!("{{\"error\":{:?}}}", e)),
         },
+        // 拡張が自分側の debug ログを agent に集約する。受け取った行を logbuf に積み、
+        // localhost 専用の /ext/health で agent ログと混ぜて後から読めるようにする
+        // ([ext] prefix で出所を明示)。logbuf は process 内 in-memory なので、接続の
+        // たびに agent が restart される運用ではセッション単位で自然にリセットされる。
+        ("POST", "/ext/log") => match parse_ext_log(body) {
+            Ok(lines) => {
+                for l in &lines {
+                    crate::logbuf::push(&format!("[ext] {l}"));
+                }
+                HttpReply::json(200, "{\"ok\":true}".to_string())
+            }
+            Err(e) => HttpReply::json(400, format!("{{\"error\":{:?}}}", e)),
+        },
         // 拡張 popup が「接続用プロンプト」を組み立てるために MCP URL を引く。
         // agent の version (release tag、dev ビルドは "dev") も併せて返し popup に表示させる。
         ("GET", "/ext/info") => {
@@ -142,6 +155,22 @@ fn handle_ext_with_poll_timeout(
         }
         _ => HttpReply::text(404, "not found\n"),
     }
+}
+
+/// `POST /ext/log` の body を行配列に変換する。`{"lines":[...]}` (バッチ) か
+/// `{"line":"..."}` (単発) を受ける。どちらでもない / parse 失敗は Err。
+fn parse_ext_log(body: &str) -> Result<Vec<String>, String> {
+    let v: serde_json::Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    if let Some(arr) = v.get("lines").and_then(|x| x.as_array()) {
+        return Ok(arr
+            .iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .collect());
+    }
+    if let Some(s) = v.get("line").and_then(|x| x.as_str()) {
+        return Ok(vec![s.to_string()]);
+    }
+    Err("expected {\"lines\":[...]} or {\"line\":\"...\"}".to_string())
 }
 
 #[cfg(test)]
@@ -274,6 +303,34 @@ mod tests {
         assert_eq!(v["mcp_url"], "https://x.trycloudflare.com/mcp");
         assert_eq!(v["ext_connected"], true);
         assert!(v["logs"].is_array());
+    }
+
+    #[test]
+    fn ext_log_single_line_pushed_to_logbuf() {
+        let b = ExtBridge::new();
+        let r = handle_ext("POST", "/ext/log", r#"{"line":"hello-from-ext"}"#, &b);
+        assert_eq!(r.status, 200);
+        // logbuf に [ext] prefix 付きで積まれ、/ext/health から読める。
+        let snap = crate::logbuf::snapshot();
+        assert!(snap.iter().any(|l| l.contains("[ext] hello-from-ext")));
+    }
+
+    #[test]
+    fn ext_log_batch_lines_pushed() {
+        let b = ExtBridge::new();
+        let r = handle_ext("POST", "/ext/log", r#"{"lines":["a-line","b-line"]}"#, &b);
+        assert_eq!(r.status, 200);
+        let snap = crate::logbuf::snapshot();
+        assert!(snap.iter().any(|l| l.contains("[ext] a-line")));
+        assert!(snap.iter().any(|l| l.contains("[ext] b-line")));
+    }
+
+    #[test]
+    fn ext_log_bad_body_is_400() {
+        let b = ExtBridge::new();
+        assert_eq!(handle_ext("POST", "/ext/log", "not json", &b).status, 400);
+        // 形式不一致 (lines/line どちらも無い) も 400。
+        assert_eq!(handle_ext("POST", "/ext/log", r#"{"x":1}"#, &b).status, 400);
     }
 
     #[test]

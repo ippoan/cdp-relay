@@ -25,6 +25,39 @@ let agentRunning = false;
 let connecting = false;
 const KEEPALIVE_ALARM = "cdp-relay-keepalive";
 
+// ─── debug ログ ──────────────────────────────────────────────────────────────
+// 拡張側のイベントを (1) in-memory リングバッファに残し popup の debug パネルへ
+// 配信し、(2) agent mode では agent の `/ext/log` に送って agent の logbuf に集約
+// する。後者により localhost の `GET /ext/health` から agent ログと混ぜて後から
+// 読める (= 「サーバー側でログを見る」をローカル agent で実現)。
+const LOG_MAX = 300;
+const logBuffer = [];
+// agent mode 接続時に agent base URL ("http://127.0.0.1:PORT") を入れる。
+// null の間は agent への送信をしない (WS mode / 未接続)。
+let logSink = null;
+
+function log(msg) {
+  const entry = { t: Date.now(), msg: String(msg) };
+  logBuffer.push(entry);
+  if (logBuffer.length > LOG_MAX) logBuffer.shift();
+  // popup が開いていれば 1 件 push (閉じていれば無視される)。
+  chrome.runtime.sendMessage({ type: "cdp-relay-log", entry }).catch(() => {});
+  shipLog(entry.msg);
+}
+
+/**
+ * agent mode の時だけ、ログ行を agent の `/ext/log` に fire-and-forget で送る。
+ * 失敗は完全に無視する。**ここで log() を呼ぶと無限ループになるので絶対に呼ばない。**
+ */
+function shipLog(line) {
+  if (!logSink) return;
+  fetch(`${logSink}/ext/log`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ line }),
+  }).catch(() => {});
+}
+
 /** Native Messaging host 名 (agent の --install-native-host が登録する manifest と一致)。 */
 const NATIVE_HOST = "com.ippoan.cdp_agent";
 
@@ -139,6 +172,7 @@ async function loadConfig() {
 
 /** popup へ接続状態を伝える (popup が開いていなければ無視される)。 */
 function reportStatus(state, detail) {
+  log(`[${state}] ${detail || ""}`);
   chrome.runtime.sendMessage({ type: "cdp-relay-status", state, detail }).catch(() => {});
 }
 
@@ -201,6 +235,8 @@ async function connectInner() {
   if (isAgentUrl(cfg.relayUrl)) {
     // agent 未起動なら Native Messaging で起動依頼する (cdp-relay#33)。
     const agentBase = cfg.relayUrl.trim().replace(/\/+$/, "");
+    // 以降のログを agent の logbuf にも集約する (agent restart 後の行から有効)。
+    logSink = agentBase;
     try {
       // 接続のたびに旧 agent を kill して最新版で起動し直す (旧バイナリ居座り対策)。
       await ensureAgentFresh(agentBase);
@@ -269,7 +305,9 @@ async function connectInner() {
       const result = await handle(method, params || {}, cfg, "ws");
       ws.send(JSON.stringify({ id, result }));
     } catch (e) {
-      ws.send(JSON.stringify({ id, error: e && e.message ? e.message : String(e) }));
+      const err = e && e.message ? e.message : String(e);
+      log(`cmd error[ws] ${method}: ${err}`);
+      ws.send(JSON.stringify({ id, error: err }));
     }
   };
 }
@@ -303,7 +341,9 @@ async function agentLoop(cfg) {
       const result = await handle(cmd.method, cmd.params || {}, cfg, "agent");
       body = { id: cmd.id, result };
     } catch (e) {
-      body = { id: cmd.id, error: e && e.message ? e.message : String(e) };
+      const err = e && e.message ? e.message : String(e);
+      log(`cmd error[agent] ${cmd.method}: ${err}`);
+      body = { id: cmd.id, error: err };
     }
     try {
       await fetch(`${base}/ext/result`, {
@@ -319,6 +359,7 @@ async function agentLoop(cfg) {
 
 async function disconnect() {
   agentRunning = false;
+  logSink = null;
   chrome.alarms.clear(KEEPALIVE_ALARM);
   if (ws) {
     try {
@@ -345,6 +386,9 @@ async function disconnect() {
  */
 async function handle(method, params, cfg, mode) {
   const target = { tabId: cfg.tabId };
+  // debug 用: 受信した CDP コマンドを記録する (url / eval 式の有無も)。
+  const hint = params && params.url ? " " + params.url : params && params.expression ? " (eval)" : "";
+  log(`cmd[${mode}] ${method}${hint}`);
   switch (method) {
     case "navigate": {
       if (!params.url || !/^https?:\/\//i.test(params.url)) throw new Error("url must be http(s)");
@@ -439,6 +483,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     chrome.storage.local.set({ autoConnect: false });
     disconnect().then(() => sendResponse({ ok: true }));
     return true;
+  }
+  // popup が開いた時点までに溜まったログをまとめて返す (debug パネル初期描画用)。
+  if (msg && msg.type === "cdp-relay-getlogs") {
+    sendResponse({ ok: true, logs: logBuffer });
+    return false;
+  }
+  if (msg && msg.type === "cdp-relay-clearlogs") {
+    logBuffer.length = 0;
+    sendResponse({ ok: true });
+    return false;
   }
   return false;
 });
