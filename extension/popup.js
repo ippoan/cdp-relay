@@ -60,10 +60,9 @@ async function restore() {
   // 既に溜まっている debug ログを取り出してパネルに描画する。
   loadLogs();
 
-  // MCP URL を先読みして接続用プロンプトを textarea に出しておく
-  // (クリック時は await を挟まず同期コピーでき、かつ手動コピーの保険になる)。
-  await refreshMcpUrl();
-  prefillPrompt();
+  // MCP URL を取得して接続用プロンプトを textarea に出す。tunnel がまだ立って
+  // いなければポーリングして進捗を見せる (= 「何も表示されない」を防ぐ)。
+  startPromptPoll();
 }
 
 function setStatus(text, cls) {
@@ -123,6 +122,53 @@ function showPrompt(text) {
 function prefillPrompt() {
   if (!cachedMcpUrl) return;
   showPrompt(buildPrompt(cachedMcpUrl, activeTabUrl || "(現在のタブ)"));
+}
+
+// 接続用プロンプトは agent の tunnel (mcp_url) が立つまで出せない。立つまで数秒〜
+// 十数秒かかるので、ポーリングしつつ textarea に進捗を出して「無反応」を防ぐ。
+let promptPollTimer = null;
+function stopPromptPoll() {
+  if (promptPollTimer) {
+    clearInterval(promptPollTimer);
+    promptPollTimer = null;
+  }
+}
+/**
+ * mcp_url が取れるまで ~2s 間隔で /ext/info を引き直し、取れたら接続用プロンプトを
+ * textarea に出す。取得待ちの間も「取得中… [n]」を出して進捗を見せる。
+ */
+function startPromptPoll() {
+  stopPromptPoll();
+  // 既に取得済みなら即出して終わり。
+  if (cachedMcpUrl) {
+    prefillPrompt();
+    return;
+  }
+  let tries = 0;
+  const MAX = 30; // ~60s
+  const tick = async () => {
+    tries++;
+    await refreshMcpUrl();
+    if (cachedMcpUrl) {
+      prefillPrompt();
+      setStatus("接続用プロンプトを下の枠に表示しました（コピー可）", "ok");
+      stopPromptPoll();
+      return;
+    }
+    // まだ tunnel が立っていない。進捗を見せる (空白で無反応に見せない)。
+    $("promptOut").value =
+      `MCP URL を取得中… (agent が tunnel を張るまで数秒) [${tries}/${MAX}]\n` +
+      `接続直後は時間がかかります。このまま少し待ってください。`;
+    if (tries >= MAX) {
+      stopPromptPoll();
+      $("promptOut").value =
+        "MCP URL を取得できませんでした。\n" +
+        "agent が起動/接続済みか確認し、『更新』→『接続』後にもう一度開いてください。";
+      setStatus("MCP URL 未確定（agent / tunnel の状態を確認）", "err");
+    }
+  };
+  promptPollTimer = setInterval(tick, 2000);
+  tick(); // 初回は即実行 (待ち表示をすぐ出す)
 }
 
 /**
@@ -208,8 +254,10 @@ $("connect").addEventListener("click", async () => {
   setStatus("接続中…");
   const res = await chrome.runtime.sendMessage({ type: "cdp-relay-connect" }).catch((e) => ({ ok: false, error: String(e) }));
   if (!res || !res.ok) setStatus("接続失敗: " + (res && res.error ? res.error : "unknown"), "err");
-  // 接続したら tunnel URL が遅れて立つので、少し置いて先読みし直す。
-  setTimeout(refreshMcpUrl, 4000);
+  // 接続後は tunnel URL が遅れて立つので、cache を捨ててからポーリングで取り直し、
+  // 立った時点で接続用プロンプトを出す (進捗は textarea に表示)。
+  cachedMcpUrl = "";
+  startPromptPoll();
 });
 
 $("disconnect").addEventListener("click", async () => {
@@ -250,15 +298,10 @@ $("copyPrompt").addEventListener("click", async () => {
     );
     return;
   }
-  // 未取得: ここで取得 (この後 gesture が切れるので textarea 手動コピーに倒す)。
-  const mcp = await refreshMcpUrl();
-  if (!mcp) {
-    setStatus("MCP URL 未確定（agent が tunnel を張るまで数秒待って再度）", "err");
-    return;
-  }
-  const text = buildPrompt(mcp, here);
-  showPrompt(text);
-  setStatus("下の枠をクリック → Ctrl+C でコピーしてください", "ok");
+  // 未取得: ポーリングを開始する。立った時点で prompt が textarea に出るので、
+  // ユーザーはそれを見て押し直せば良い (取得待ちの進捗も textarea に出る)。
+  setStatus("MCP URL を取得中… 下の枠に出たら再度コピーを押してください", "");
+  startPromptPoll();
 });
 
 // 接続用プロンプト枠はクリックで全選択 (手動コピーを 1 操作で)。
