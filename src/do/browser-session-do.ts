@@ -41,6 +41,20 @@ const MAX_PAIR_TTL_SECONDS = 86_400;
  */
 const MAX_STASH_BYTES = 1024 * 1024;
 
+/**
+ * stash で許可する Content-Type の base type allowlist。
+ * `/shot/{session}/{id}` GET は予測不能 id とはいえ **cdp-relay origin で配信**されるため、
+ * `text/html` 等の active type を保存させると stored XSS になり得る (認証済み呼び出し元が
+ * `<script>` を stash → shot_url を被害者に踏ませる)。用途は text/base64/JSON dump なので
+ * 非 active な type に限定する。charset 等の parameter は許容 (base type だけ照合)。
+ */
+const STASH_ALLOWED_CONTENT_TYPES = new Set([
+  "text/plain",
+  "application/json",
+  "application/octet-stream",
+  "text/csv",
+]);
+
 /** 32 byte (256-bit) の高エントロピー hex を返す (pairing code 用)。 */
 function randomCode(): string {
   const b = crypto.getRandomValues(new Uint8Array(32));
@@ -327,10 +341,16 @@ export class BrowserSessionDO {
     if (typeof expression !== "string" || expression === "") {
       return json({ error: "expression_required" }, 400);
     }
+    // active type (text/html 等) を保存させない (stored XSS 防止)。base type で照合し、
+    // 不許可なら eval 往復を投げる前に fail-fast で reject する。
     const contentType =
       typeof body.content_type === "string" && body.content_type !== ""
         ? body.content_type
         : "text/plain; charset=utf-8";
+    const baseType = contentType.split(";", 1)[0].trim().toLowerCase();
+    if (!STASH_ALLOWED_CONTENT_TYPES.has(baseType)) {
+      return json({ error: "unsupported_content_type", content_type: baseType }, 400);
+    }
 
     let result: unknown;
     try {
@@ -460,6 +480,11 @@ export class BrowserSessionDO {
         // 一時 URL。共有はせず短命キャッシュのみ。
         "Cache-Control": "private, max-age=60",
         "X-Content-Type-Options": "nosniff",
+        // defense-in-depth: 保存値が万一 active type でも cdp-relay origin で実行
+        // させない。常に download 扱い + CSP で script/embed を全面禁止する
+        // (回収は curl -o なので attachment / CSP の影響は無い)。
+        "Content-Disposition": "attachment",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
       },
     });
   }

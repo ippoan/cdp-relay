@@ -156,6 +156,16 @@ describe("MCP tools (/cmd 往復)", () => {
     await expect(browserStash(E, "", "1")).rejects.toThrow(/session is required/);
   });
 
+  it("browser_stash は active な content_type (text/html) を弾く (stored XSS 防止)", async () => {
+    const session = "stashbad-" + crypto.randomUUID();
+    // content_type 検証は eval 往復より前なので handler は呼ばれないが、拡張は接続済み
+    // でないと先に extension_not_connected で落ちるため繋いでおく。
+    await connectExtension(session, () => ({ value: "<script>alert(1)</script>" }));
+    await expect(
+      browserStash(E, session, "'<script>alert(1)</script>'", "text/html"),
+    ).rejects.toThrow(/unsupported_content_type/);
+  });
+
   it("url が http(s) でなければ弾く", async () => {
     await expect(browserNavigate(E, "x", "ftp://nope")).rejects.toThrow(CdpToolError);
   });
