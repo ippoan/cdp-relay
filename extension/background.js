@@ -159,6 +159,33 @@ async function ensureAgentRunning(base) {
   throw new Error("agent を起動したが ext server に到達できない");
 }
 
+/**
+ * popup「更新」フロー: agent を taskkill→再起動して起動時 self-update を起こし
+ * (新 dev-N binary 取得 + 拡張ファイル refresh)、disk の拡張ファイルが新しくなる猶予を
+ * 置いてから拡張を再読込する。agent mode のみ agent を触る (WS mode は local agent 無し)。
+ * 失敗しても最後は必ず chrome.runtime.reload() する (= 従来挙動への degrade)。
+ */
+async function reloadAllFlow() {
+  try {
+    const cfg = await loadConfig();
+    if (isAgentUrl(cfg.relayUrl)) {
+      const base = cfg.relayUrl.trim().replace(/\/+$/, "");
+      // WS を畳んでから restart (再接続が restart と競合しないように)。
+      await disconnect().catch(() => {});
+      // native {cmd:"restart"} で旧 agent を taskkill→installed 版を起動 →
+      // その startup で self-update が走り、必要なら新 dev-N へ二段再起動 + 拡張 refresh。
+      await ensureAgentFresh(base);
+      // self-update の二段再起動 + update_extension(disk 書込) が落ち着くまでの猶予。
+      await sleep(6000);
+    }
+  } catch (e) {
+    log("[reload-all] agent 再起動 skip: " + String(e));
+  } finally {
+    // 拡張を再読込して disk 上の新しい拡張ファイル (manifest version 含む) を反映。
+    chrome.runtime.reload();
+  }
+}
+
 /** popup / storage の設定を読む。Relay URL 未設定なら手元 agent (19222) に fallback。 */
 async function loadConfig() {
   const c = await chrome.storage.local.get(["relayUrl", "session", "token", "tabId"]);
@@ -483,6 +510,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     chrome.storage.local.set({ autoConnect: false });
     disconnect().then(() => sendResponse({ ok: true }));
     return true;
+  }
+  // popup「更新」: agent を再起動して self-update を起こし (新 dev-N の binary 取得 +
+  // 拡張ファイル refresh)、disk 上の拡張ファイルが新しくなってから拡張を再読込する。
+  // reload で background ごと再起動するので、この後の sendResponse は返らない (fire-and-forget)。
+  if (msg && msg.type === "cdp-relay-reload-all") {
+    reloadAllFlow();
+    return false;
   }
   // popup が開いた時点までに溜まったログをまとめて返す (debug パネル初期描画用)。
   if (msg && msg.type === "cdp-relay-getlogs") {
