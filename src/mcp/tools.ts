@@ -155,6 +155,11 @@ export interface StashResult {
   size_bytes: number;
   /** 保存時の Content-Type。 */
   content_type: string;
+  /**
+   * DO 内部での chunk 分割数。MAX_STASH_BYTES(1MiB) 超は複数行に分割保存されるが、
+   * stash_url の GET 側が連結配信するので **回収は 1 回の curl で済む** (情報目的の値)。
+   */
+  n_parts: number;
 }
 
 /**
@@ -191,6 +196,7 @@ export async function browserStash(
     id?: string;
     size_bytes?: number;
     content_type?: string;
+    n_parts?: number;
     error?: string;
   };
   if (!res.ok || !body.id) {
@@ -200,5 +206,6 @@ export async function browserStash(
     stash_url: `${relayOrigin(env)}/shot/${encodeURIComponent(session)}/${body.id}`,
     size_bytes: body.size_bytes ?? 0,
     content_type: body.content_type ?? "text/plain; charset=utf-8",
+    n_parts: body.n_parts ?? 1,
   };
 }

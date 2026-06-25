@@ -145,7 +145,10 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
             "browser_eval と違い結果値を MCP body に載せないので、localStorage dump や gzip+base64 等の " +
             "大きな値を Claude の context を経由させず `curl -o /tmp/out.txt <stash_url>` でコンテナに落とせる " +
             "(context 経由 + Write だと長大な base64 を逐語再生できず壊れる)。stash_url は短命 (既定 5 分) / " +
-            "無認証 (予測不能 id)。文字列以外を返す式は JSON 文字列化して保存する。拡張未接続なら extension_not_connected。",
+            "無認証 (予測不能 id)。文字列以外を返す式は JSON 文字列化して保存する。" +
+            "**大きな値 (1MiB 超) は DO 内部で自動 chunk 分割保存され、stash_url の GET が連結配信するので " +
+            "回収は単一 URL の `curl -o` 1 回で済む** (手動 substr 分割は不要、最大 64MiB)。" +
+            "拡張未接続なら extension_not_connected。",
           inputSchema: {
             session: z.string().describe("拡張接続の session 名"),
             expression: z
