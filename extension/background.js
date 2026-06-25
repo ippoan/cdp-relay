@@ -90,10 +90,18 @@ async function pingAgent(base, timeoutMs = 1500) {
 function sendNative(message) {
   return new Promise((resolve, reject) => {
     let settled = false;
+    // restart は host (= agent) 自身を taskkill するため callback が返らないことがある。
+    // timeout を入れて Promise が永久に pending になる (= 呼び出し側 hang) のを防ぐ。
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("native messaging timeout"));
+    }, 8000);
     try {
       chrome.runtime.sendNativeMessage(NATIVE_HOST, message, (resp) => {
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
         const err = chrome.runtime.lastError;
         if (err) {
           reject(new Error(err.message || "native messaging 失敗"));
@@ -104,6 +112,7 @@ function sendNative(message) {
     } catch (e) {
       if (!settled) {
         settled = true;
+        clearTimeout(timer);
         reject(e instanceof Error ? e : new Error(String(e)));
       }
     }
@@ -174,9 +183,16 @@ async function reloadAllFlow() {
       await disconnect().catch(() => {});
       // native {cmd:"restart"} で旧 agent を taskkill→installed 版を起動 →
       // その startup で self-update が走り、必要なら新 dev-N へ二段再起動 + 拡張 refresh。
-      await ensureAgentFresh(base);
+      //
+      // ⚠ restart は native host (= agent 自身) を taskkill するため、sendNativeMessage の
+      // callback が返らず ensureAgentFresh が永久に hang し得る (= 「お待ちください」で固まる)。
+      // hard timeout で必ず先へ進め、最後の finally で reload を保証する。
+      await Promise.race([
+        ensureAgentFresh(base).catch((e) => log("[reload-all] restart err: " + String(e))),
+        sleep(15000),
+      ]);
       // self-update の二段再起動 + update_extension(disk 書込) が落ち着くまでの猶予。
-      await sleep(6000);
+      await sleep(4000);
     }
   } catch (e) {
     log("[reload-all] agent 再起動 skip: " + String(e));
