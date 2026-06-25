@@ -132,6 +132,25 @@ describe("MCP tools (/cmd 往復)", () => {
     expect(await got.text()).toBe(payload);
   });
 
+  it("browser_stash は 1MiB 超を chunk 分割保存し単一 stash_url で全量回収できる", async () => {
+    const session = "stashbig-" + crypto.randomUUID();
+    // 1MiB(=MAX_STASH_BYTES) を超える payload → DO 内部で複数行に分割保存される。
+    const payload = "x".repeat(1024 * 1024 + 123_456); // ~1.12 MiB → 2 parts
+    await connectExtension(session, (method) => {
+      if (method !== "eval") throw new Error("unexpected:" + method);
+      return { value: payload };
+    });
+    const r = await browserStash(E, session, "window.__huge");
+    expect(r.size_bytes).toBe(payload.length);
+    expect(r.n_parts).toBe(2); // ceil(1.12MiB / 1MiB)
+    // 回収は連結配信されるので単一 curl 相当 (SELF.fetch) で全量が戻る。
+    const got = await SELF.fetch(r.stash_url);
+    expect(got.status).toBe(200);
+    const text = await got.text();
+    expect(text.length).toBe(payload.length);
+    expect(text).toBe(payload);
+  });
+
   it("browser_stash は object 値を JSON 文字列化して保存する (content_type 指定)", async () => {
     const session = "stashobj-" + crypto.randomUUID();
     await connectExtension(session, (method) => {

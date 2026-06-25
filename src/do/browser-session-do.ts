@@ -26,6 +26,16 @@ type ShotRow = {
   bytes: ArrayBuffer;
 };
 
+type StashPartRow = {
+  group_id: string;
+  seq: number;
+  created_at: number;
+  content_type: string;
+  total_size: number;
+  n_parts: number;
+  bytes: ArrayBuffer;
+};
+
 interface Pending {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
@@ -40,6 +50,13 @@ const MAX_PAIR_TTL_SECONDS = 86_400;
  * なので 1 MiB あれば十分 (screenshot ~200KB 程度も収まる)。超過は 413 で reject。
  */
 const MAX_STASH_BYTES = 1024 * 1024;
+
+/**
+ * stash payload 全体 (chunk 分割後の合計) の上限。1 行 = MAX_STASH_BYTES に分割して
+ * 複数行に保存するので 1 行上限は超えないが、DO storage 全体の暴走を防ぐため合計にも
+ * cap を設ける。64 MiB あれば 3MB 級の提出 ZIP 等は余裕で収まる。超過は 413 で reject。
+ */
+const MAX_STASH_TOTAL_BYTES = 64 * 1024 * 1024;
 
 /**
  * stash で許可する Content-Type の base type allowlist。
@@ -77,6 +94,22 @@ export class BrowserSessionDO {
         created_at INTEGER NOT NULL,
         content_type TEXT NOT NULL,
         bytes BLOB NOT NULL
+      );`,
+    );
+    // 大きい stash payload を MAX_STASH_BYTES 単位の chunk 行に分割保存する。
+    // 1 行が SQLite row 上限を圧迫しないよう chunk 化し、`/shot/{id}` GET 側で seq 順に
+    // 連結配信する (= 呼び出し側は 1 回の curl で全体を回収でき、手動 substr 分割が不要)。
+    // group_id は単一の stash_url の id。total_size / n_parts は配信時の検証用。
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS stash_parts(
+        group_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        content_type TEXT NOT NULL,
+        total_size INTEGER NOT NULL,
+        n_parts INTEGER NOT NULL,
+        bytes BLOB NOT NULL,
+        PRIMARY KEY (group_id, seq)
       );`,
     );
     // pair flow: browser_pair が mint する短命 pairing code。hibernate を跨ぐので
@@ -368,24 +401,48 @@ export class BrowserSessionDO {
     const payload = typeof value === "string" ? value : JSON.stringify(value ?? null);
     const bytes = new TextEncoder().encode(payload);
     if (bytes.length === 0) return json({ error: "empty_value" }, 400);
-    if (bytes.length > MAX_STASH_BYTES) {
+    if (bytes.length > MAX_STASH_TOTAL_BYTES) {
       return json({ error: "stash_too_large", size_bytes: bytes.length }, 413);
     }
 
     const now = Date.now();
     const ttlMs = settings(this.env).shotTtlSeconds * 1000;
+    // 古い stash / screenshot を掃除 (alarm 無しでも肥大化しない)。
     this.sql.exec("DELETE FROM shots WHERE created_at < ?", now - ttlMs);
+    this.sql.exec("DELETE FROM stash_parts WHERE created_at < ?", now - ttlMs);
     const id = crypto.randomUUID();
-    this.sql.exec(
-      "INSERT INTO shots(id, created_at, content_type, bytes) VALUES (?, ?, ?, ?)",
-      id,
-      now,
-      contentType,
-      bytes,
-    );
-    // stash_url は呼び出し側 (tool) が relayOrigin で組む (RELAY_ORIGIN="" だと内部
-    // origin になり公開不可なため、ここでは id だけ返す)。
-    return json({ id, content_type: contentType, size_bytes: bytes.length });
+
+    if (bytes.length <= MAX_STASH_BYTES) {
+      // 単一行 (従来通り、screenshot と同じ shots テーブル)。
+      this.sql.exec(
+        "INSERT INTO shots(id, created_at, content_type, bytes) VALUES (?, ?, ?, ?)",
+        id,
+        now,
+        contentType,
+        bytes,
+      );
+      // stash_url は呼び出し側 (tool) が relayOrigin で組む (RELAY_ORIGIN="" だと内部
+      // origin になり公開不可なため、ここでは id だけ返す)。
+      return json({ id, content_type: contentType, size_bytes: bytes.length, n_parts: 1 });
+    }
+
+    // MAX_STASH_BYTES 超は chunk 分割して stash_parts に保存。`/shot/{id}` GET が seq 順に
+    // 連結して 1 レスポンスで配信するので、呼び出し側は単一 stash_url を curl するだけで良い。
+    const nParts = Math.ceil(bytes.length / MAX_STASH_BYTES);
+    for (let seq = 0; seq < nParts; seq++) {
+      const part = bytes.slice(seq * MAX_STASH_BYTES, (seq + 1) * MAX_STASH_BYTES);
+      this.sql.exec(
+        "INSERT INTO stash_parts(group_id, seq, created_at, content_type, total_size, n_parts, bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        id,
+        seq,
+        now,
+        contentType,
+        bytes.length,
+        nParts,
+        part,
+      );
+    }
+    return json({ id, content_type: contentType, size_bytes: bytes.length, n_parts: nParts });
   }
 
   // ─── WS hibernation lifecycle ───────────────────────────────────────────────
@@ -465,7 +522,8 @@ export class BrowserSessionDO {
     const m = path.match(/^\/shot\/[^/]+\/([^/]+)/);
     const id = m ? m[1] : "";
     const rows = this.sql.exec<ShotRow>("SELECT * FROM shots WHERE id = ?", id).toArray();
-    if (rows.length === 0) return text("not found", 404);
+    // shots に無ければ chunk 分割 stash の group とみなし、seq 順に連結して配信する。
+    if (rows.length === 0) return this.serveStashParts(id);
 
     const row = rows[0];
     const ttlMs = settings(this.env).shotTtlSeconds * 1000;
@@ -483,6 +541,46 @@ export class BrowserSessionDO {
         // defense-in-depth: 保存値が万一 active type でも cdp-relay origin で実行
         // させない。常に download 扱い + CSP で script/embed を全面禁止する
         // (回収は curl -o なので attachment / CSP の影響は無い)。
+        "Content-Disposition": "attachment",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+      },
+    });
+  }
+
+  /**
+   * chunk 分割 stash (stash_parts) を seq 順に連結して 1 レスポンスで配信する。
+   * handleStash が MAX_STASH_BYTES 超を複数行に割って保存したものを、呼び出し側は
+   * 単一 stash_url の `curl -o` で全体回収できる (= 手動 substr 分割が不要)。
+   */
+  private serveStashParts(groupId: string): Response {
+    const parts = this.sql
+      .exec<StashPartRow>("SELECT * FROM stash_parts WHERE group_id = ? ORDER BY seq ASC", groupId)
+      .toArray();
+    if (parts.length === 0) return text("not found", 404);
+
+    const ttlMs = settings(this.env).shotTtlSeconds * 1000;
+    if (parts[0].created_at < Date.now() - ttlMs) {
+      this.sql.exec("DELETE FROM stash_parts WHERE group_id = ?", groupId);
+      return text("expired", 410);
+    }
+
+    const nParts = parts[0].n_parts;
+    // 行が欠けている (保存途中 / 一部 TTL 落ち) なら壊れた連結を返さず 404。
+    if (parts.length !== nParts) return text("not found", 404);
+
+    const out = new Uint8Array(parts[0].total_size);
+    let off = 0;
+    for (const p of parts) {
+      const chunk = new Uint8Array(p.bytes);
+      out.set(chunk, off);
+      off += chunk.length;
+    }
+
+    return new Response(out, {
+      headers: {
+        "Content-Type": parts[0].content_type,
+        "Cache-Control": "private, max-age=60",
+        "X-Content-Type-Options": "nosniff",
         "Content-Disposition": "attachment",
         "Content-Security-Policy": "default-src 'none'; sandbox",
       },
