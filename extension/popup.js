@@ -249,7 +249,7 @@ $("relayUrl").addEventListener("input", () => {
   toggleModeFields();
 });
 
-$("connect").addEventListener("click", async () => {
+async function doConnect() {
   await save();
   setStatus("接続中…");
   const res = await chrome.runtime.sendMessage({ type: "cdp-relay-connect" }).catch((e) => ({ ok: false, error: String(e) }));
@@ -258,6 +258,41 @@ $("connect").addEventListener("click", async () => {
   // 立った時点で接続用プロンプトを出す (進捗は textarea に表示)。
   cachedMcpUrl = "";
   startPromptPoll();
+}
+
+$("connect").addEventListener("click", doConnect);
+
+/**
+ * `cdp1.<base64url(JSON{r,s,t})>` 接続文字列を decode する。browser_pair が返す
+ * pair_string と同形式。不正なら null。
+ */
+function parsePairString(s) {
+  s = (s || "").trim();
+  if (!s.startsWith("cdp1.")) return null;
+  try {
+    let b64 = s.slice(5).replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const o = JSON.parse(new TextDecoder().decode(bytes));
+    if (o && o.r && o.s && o.t) return { relay: String(o.r), session: String(o.s), token: String(o.t) };
+  } catch {
+    /* 不正な文字列は無視 */
+  }
+  return null;
+}
+
+// 「接続文字列（1コピペ）」: cdp1.… を貼ると 3 欄を自動入力して接続まで走らせる。
+// token を欄に残さないよう combo は使い捨て (クリア)。対象タブは現在の選択 (既定=アクティブ)。
+$("combo").addEventListener("input", async () => {
+  const p = parsePairString($("combo").value);
+  if (!p) return;
+  $("relayUrl").value = p.relay;
+  $("session").value = p.session;
+  $("token").value = p.token;
+  $("combo").value = "";
+  toggleModeFields();
+  setStatus("接続文字列を読み込みました。接続中…");
+  await doConnect();
 });
 
 $("disconnect").addEventListener("click", async () => {

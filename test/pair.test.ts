@@ -24,6 +24,17 @@ describe("browser_pair (pairing code の mint)", () => {
     const r = await browserPair(E, session);
     expect(r.session).toBe(session);
   });
+
+  it("pair_string は cdp1.<base64url> で relay/session/token を 1 文字列に pack する", async () => {
+    const session = "paircombo-" + crypto.randomUUID();
+    const r = await browserPair(E, session);
+    expect(r.pair_string).toMatch(/^cdp1\.[A-Za-z0-9_-]+$/);
+    // popup 側 decode と同じ手順で 3 値に戻せること。
+    let b64 = r.pair_string.slice(5).replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const o = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))));
+    expect(o).toEqual({ r: r.relay_url, s: r.session, t: r.pair_code });
+  });
 });
 
 describe("pairing code での /ext + /shot 接続", () => {

@@ -72,8 +72,10 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
 `createWorkerMcp` を使用 (`src/mcp/server.ts`)。実ロジックは `src/mcp/tools.ts`。
 
 - `browser_pair(session?, ttl_seconds?)` — 手元拡張を session にペアリングする**短命 pairing
-  code** を発行 (`{ session, pair_code, expires_in_seconds, relay_url }`)。静的 `RELAY_TOKEN`
-  を人手で調べる代わりに、Claude が code を発行して手元に渡す (下記 *pair flow* 参照)
+  code** を発行 (`{ session, pair_code, expires_in_seconds, relay_url, pair_string }`)。静的 `RELAY_TOKEN`
+  を人手で調べる代わりに、Claude が code を発行して手元に渡す (下記 *pair flow* 参照)。
+  `pair_string` (`cdp1.…` の 1 文字列) は relay/session/token を pack したもので、popup の
+  「接続文字列（1コピペ）」欄に貼るだけで 3 欄自動入力＋接続まで走る
 - `browser_navigate(session, url)` — 手元 Chrome を url に遷移 (http(s) のみ)。`{ url }` を返す
 - `browser_screenshot(session)` — viewport を撮って `{ shot_url }` を返す
 - `browser_eval(session, expression)` — 現在ページで JS 式を評価し `{ value }` を返す。text 取得は `document.body.innerText` 等 (PNG と違い値が小さいので shot_url ではなく値を直接返す)
@@ -100,8 +102,9 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
 Claude が会話で手元に渡す。拡張はその code を `?token=` に使って `/ext` `/shot` に接続する:
 
 1. Claude が `browser_pair()` を呼ぶ → DO が pairing code を mint し SQLite に保存 (TTL 付き)
-2. tool が `{ session, pair_code, relay_url }` を返す → Claude が「これを popup に貼って」と提示
-3. ユーザーが popup の **Relay URL / Session / Token** にそれぞれ貼って接続
+2. tool が `{ session, pair_code, relay_url, pair_string }` を返す → Claude が「これを popup に貼って」と提示
+3. ユーザーが popup に貼って接続。**`pair_string` を「接続文字列（1コピペ）」欄に貼れば 3 欄自動入力＋接続**
+   (従来どおり **Relay URL / Session / Token** を個別に貼ってもよい)
 4. edge は `?token=` が `RELAY_TOKEN` と不一致なら `X-Relay-Auth: pair` を付けて DO に委譲し、
    DO が pairing code として権威的に検証 (未失効・session 一致なら通す)
 

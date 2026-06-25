@@ -51,8 +51,9 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
         {
           description:
             "手元 Chrome の MV3 拡張をこの session にペアリングするための短命 pairing code を発行する。" +
-            "返り値の { relay_url, session, pair_code } を拡張 popup の Relay URL / Session / Token に貼って" +
-            "「接続」すると、その session の DO に拡張 WS が合流し、以降 browser_navigate / browser_screenshot が使える。" +
+            "返り値の `pair_string` (cdp1.… の 1 文字列) を拡張 popup の「接続文字列（1コピペ）」欄に貼るだけで " +
+            "Relay URL / Session / Token が自動入力され接続まで走る (3 欄個別貼りも従来通り可)。" +
+            "接続すると その session の DO に拡張 WS が合流し、以降 browser_navigate / browser_screenshot / browser_eval / browser_stash が使える。" +
             "pair_code は短命 (既定 15 分) で session 単位。静的 RELAY_TOKEN を人手で調べる代わりに使う。",
           inputSchema: {
             session: z

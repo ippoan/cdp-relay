@@ -79,6 +79,12 @@ export interface PairResult {
   expires_in_seconds: number;
   /** popup の Relay URL 欄に入れる公開 origin。 */
   relay_url: string;
+  /**
+   * relay_url / session / pair_code を 1 つに encode した「接続文字列」(`cdp1.<base64url>`)。
+   * 拡張 popup の「接続文字列（1コピペ）」欄に貼ると 3 欄が自動入力され接続まで走る。
+   * 中身は 3 値と同じ (pair_code は会話可・短命) なので会話に出してよい。
+   */
+  pair_string: string;
 }
 
 /**
@@ -110,12 +116,25 @@ export async function browserPair(
   if (!res.ok || !body.pair_code) {
     throw new CdpToolError(body.error ?? `pair_failed_${res.status}`);
   }
+  const relay = relayOrigin(env);
   return {
     session: s,
     pair_code: body.pair_code,
     expires_in_seconds: body.expires_in_seconds ?? 0,
-    relay_url: relayOrigin(env),
+    relay_url: relay,
+    pair_string: packPairString(relay, s, body.pair_code),
   };
+}
+
+/**
+ * relay_url / session / pair_code を 1 コピペ用の 1 文字列に pack する。
+ * 形式は `cdp1.<base64url(JSON{r,s,t})>`。拡張 popup 側が同形式を decode して 3 欄を埋める。
+ * pair_code は短命・session スコープなので会話に出してよい (RELAY_TOKEN とは別物)。
+ */
+function packPairString(relay: string, session: string, code: string): string {
+  const json = JSON.stringify({ r: relay, s: session, t: code });
+  const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(json)));
+  return "cdp1." + b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 export interface ScreenshotResult {
