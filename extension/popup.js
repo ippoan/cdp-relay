@@ -309,11 +309,20 @@ let reloadArmed = false;
 $("reload").addEventListener("click", () => {
   if (!reloadArmed) {
     reloadArmed = true;
-    $("reload").textContent = "もう一度押すと再読込（接続が切れます）";
-    setStatus("再読込の確認待ち。もう一度「更新」を押すと反映されます。");
+    $("reload").textContent = "もう一度押すと再読込（agent 再起動 + 拡張更新）";
+    setStatus("確認待ち。もう一度「更新」を押すと agent を再起動して最新版に更新します。");
     return;
   }
-  chrome.runtime.reload();
+  // agent mode では「拡張の再読込」だけでは disk 上の拡張ファイルが古いまま
+  // (popup の version が変わらない) ため、まず agent を taskkill→再起動して
+  // 起動時 self-update を走らせ (= 新 dev-N の binary 取得 + 拡張ファイル refresh)、
+  // その後に拡張を chrome.runtime.reload() する処理を background に委ねる。
+  // (background が reload まで行うので popup が閉じても完了する)
+  setStatus("agent を再起動 → 自己更新 → 拡張を再読込します（10〜20秒お待ちください）…");
+  chrome.runtime.sendMessage({ type: "cdp-relay-reload-all" }).catch(() => {
+    // background 不在等の保険: 従来どおり拡張だけ再読込
+    chrome.runtime.reload();
+  });
 });
 
 // 接続用プロンプトをコピー: 先読み済みの MCP URL から同期コピー。
