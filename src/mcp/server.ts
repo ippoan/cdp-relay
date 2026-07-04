@@ -22,6 +22,7 @@ import { createWorkerMcp } from "@ippoan/mcp-cf-workers";
 import { z } from "zod";
 import type { Env } from "../env";
 import {
+  browserCookies,
   browserEval,
   browserNavigate,
   browserPair,
@@ -172,6 +173,36 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
         }) => {
           try {
             return ok(await browserStash(env, session, expression, content_type));
+          } catch (e) {
+            return fail(e);
+          }
+        },
+      );
+
+      server.registerTool(
+        "browser_cookies",
+        {
+          description:
+            "手元 Chrome で **対象 origin の cookie を取得** し、回収用 URL ({ cookies_url }) を返す。" +
+            "用途: 手元ブラウザでサイトに login した後の session cookie を CCoW 側が借り、login " +
+            "(credential を使う部分) をスキップして認証後の操作 (検索/ダウンロード等) を回すため。" +
+            "credential は『手元ブラウザ → サイト』の手元 egress だけを通り、CCoW / egress gateway を " +
+            "一切通らない (gateway の TLS MITM で credential が平文化される問題を回避)。" +
+            "cookie 生値は MCP body に載せず、`curl -o /tmp/cookies.json <cookies_url>` で回収する " +
+            "(cookie は session capability なので context に残さない)。Network.getCookies なので " +
+            "HttpOnly な JSESSIONID 等も取れる。**urls は必須** (対象 origin に絞り、手元の全 cookie を " +
+            "吸い上げない)。この方式で検証できるのは『cookie での認証後操作』のみで、login 実装自体は " +
+            "検証されない点に注意。拡張が未接続なら extension_not_connected。",
+          inputSchema: {
+            session: z.string().describe("拡張接続の session 名"),
+            urls: z
+              .array(z.string())
+              .describe("cookie を取得する対象 URL/origin (例: ['https://www.etc-meisai.jp'])。必須・空不可"),
+          },
+        },
+        async ({ session, urls }: { session: string; urls: string[] }) => {
+          try {
+            return ok(await browserCookies(env, session, urls));
           } catch (e) {
             return fail(e);
           }

@@ -21,6 +21,7 @@ export class CdpToolError extends Error {
 const DO_CMD_URL = "https://cdp-relay.internal/cmd";
 const DO_PAIR_URL = "https://cdp-relay.internal/pair";
 const DO_STASH_URL = "https://cdp-relay.internal/stash";
+const DO_COOKIES_URL = "https://cdp-relay.internal/cookies";
 
 /** RELAY_ORIGIN を公開 origin に正規化する (空なら本番 custom domain)。 */
 function relayOrigin(env: Env): string {
@@ -226,5 +227,66 @@ export async function browserStash(
     size_bytes: body.size_bytes ?? 0,
     content_type: body.content_type ?? "text/plain; charset=utf-8",
     n_parts: body.n_parts ?? 1,
+  };
+}
+
+export interface CookiesResult {
+  /**
+   * cookie 配列 (`{ cookies: [...] }` JSON) を保存した一時 URL。
+   * `curl -o /tmp/cookies.json <cookies_url>` で回収する (短命・予測不能 id)。
+   * cookie 生値は MCP body に載せない (session hijack token を context に残さないため)。
+   */
+  cookies_url: string;
+  /** 保存した byte 数。 */
+  size_bytes: number;
+  /** 保存時の Content-Type (application/json)。 */
+  content_type: string;
+}
+
+/**
+ * 手元 Chrome の cookie を **対象 origin (urls) に絞って** 取得し、DO に保存して
+ * 回収用 URL を返す (Network.getCookies なので HttpOnly な JSESSIONID も取れる)。
+ *
+ * 用途 (Refs ohishi-exp/dtako-scraper#22): 手元ブラウザでサイトに login した後の
+ * session cookie を CCoW 側が借り、login (credential を使う部分) をスキップして
+ * 認証後の操作を回す。credential は「手元ブラウザ → サイト」= 手元マシンの egress
+ * だけを通り、CCoW / Anthropic egress gateway を一切通らない (= gateway の TLS MITM
+ * 終端で credential が平文復号される問題を回避する)。
+ *
+ * cookie は credential より下位 tier (session capability、失効する) だが hijack 可
+ * なので、生値は戻り値に載せず stash と同じ id 回収経路に固定する。urls は必須
+ * (対象 origin に絞り、手元の全 cookie を吸い上げない)。
+ */
+export async function browserCookies(
+  env: Env,
+  session: string,
+  urls: string[],
+): Promise<CookiesResult> {
+  if (typeof session !== "string" || session === "") {
+    throw new CdpToolError("session is required");
+  }
+  if (!Array.isArray(urls) || urls.length === 0) {
+    throw new CdpToolError("urls is required (etc-meisai.jp 等の対象 origin に絞ること)");
+  }
+  const id = env.BROWSER_DO.idFromName(session);
+  const stub = env.BROWSER_DO.get(id);
+  const res = await stub.fetch(DO_COOKIES_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ urls }),
+  });
+  const body = (await res.json()) as {
+    id?: string;
+    size_bytes?: number;
+    content_type?: string;
+    error?: string;
+  };
+  if (!res.ok || !body.id) {
+    throw new CdpToolError(body.error ?? `cookies_failed_${res.status}`);
+  }
+  return {
+    cookies_url: `${relayOrigin(env)}/shot/${encodeURIComponent(session)}/${body.id}`,
+    size_bytes: body.size_bytes ?? 0,
+    content_type: body.content_type ?? "application/json; charset=utf-8",
   };
 }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
 import {
+  browserCookies,
   browserEval,
   browserNavigate,
   browserScreenshot,
@@ -183,6 +184,89 @@ describe("MCP tools (/cmd 往復)", () => {
     await expect(
       browserStash(E, session, "'<script>alert(1)</script>'", "text/html"),
     ).rejects.toThrow(/unsupported_content_type/);
+  });
+
+  it("browser_cookies が Network.getCookies を転送し cookies_url で回収できる", async () => {
+    const session = "cookies-" + crypto.randomUUID();
+    const cookies = [
+      { name: "JSESSIONID", value: "ABC123", domain: "www.etc-meisai.jp", httpOnly: true },
+      { name: "csrf", value: "xyz", domain: "www.etc-meisai.jp" },
+    ];
+    await connectExtension(session, (method, params) => {
+      if (method !== "cookies") throw new Error("unexpected:" + method);
+      // urls (対象 origin 絞り) がそのまま拡張へ渡ること。
+      expect(params.urls).toEqual(["https://www.etc-meisai.jp"]);
+      return { cookies };
+    });
+    const r = await browserCookies(E, session, ["https://www.etc-meisai.jp"]);
+    // cookie 生値は戻り値に載らず、回収 URL だけが返る (context に session token を残さない)。
+    expect(r).not.toHaveProperty("cookies");
+    expect(r.content_type).toBe("application/json; charset=utf-8");
+    expect(r.cookies_url).toBe(
+      `https://cdp-relay.test/shot/${session}/${r.cookies_url.split("/").pop()}`,
+    );
+    const got = await SELF.fetch(r.cookies_url);
+    expect(got.status).toBe(200);
+    expect(JSON.parse(await got.text())).toEqual({ cookies });
+  });
+
+  it("browser_cookies は拡張が cookies を返さなくても空配列で保存する", async () => {
+    const session = "cookies-empty-" + crypto.randomUUID();
+    await connectExtension(session, () => ({})); // cookies フィールド無し
+    const r = await browserCookies(E, session, ["https://x.example"]);
+    const got = await SELF.fetch(r.cookies_url);
+    expect(JSON.parse(await got.text())).toEqual({ cookies: [] });
+  });
+
+  it("browser_cookies は urls 空 / session 空を弾く", async () => {
+    await expect(browserCookies(E, "s", [])).rejects.toThrow(/urls is required/);
+    await expect(browserCookies(E, "", ["https://x"])).rejects.toThrow(/session is required/);
+  });
+
+  it("browser_cookies は拡張未接続で extension_not_connected", async () => {
+    await expect(
+      browserCookies(E, "noext-" + crypto.randomUUID(), ["https://x.example"]),
+    ).rejects.toThrow(/extension_not_connected/);
+  });
+
+  it("browser_cookies DO は不正 body / urls 空を弾く (tool を迂回した防御)", async () => {
+    const session = "cookies-do-" + crypto.randomUUID();
+    await connectExtension(session, () => ({ cookies: [] }));
+    const stub = E.BROWSER_DO.get(E.BROWSER_DO.idFromName(session));
+    const bad = await stub.fetch("https://cdp-relay.internal/cookies", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "not json",
+    });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { error: string }).error).toBe("bad_request");
+    const noUrls = await stub.fetch("https://cdp-relay.internal/cookies", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ urls: [] }),
+    });
+    expect(noUrls.status).toBe(400);
+    expect(((await noUrls.json()) as { error: string }).error).toBe("urls_required");
+  });
+
+  it("browser_cookies は拡張エラーを 502 相当で伝播する", async () => {
+    const session = "cookies-err-" + crypto.randomUUID();
+    await connectExtension(session, () => {
+      throw new Error("Network.getCookies failed");
+    });
+    await expect(browserCookies(E, session, ["https://x.example"])).rejects.toThrow(
+      /Network.getCookies failed/,
+    );
+  });
+
+  it("browser_cookies は拡張無応答で cdp_timeout", async () => {
+    const session = "cookies-to-" + crypto.randomUUID();
+    const res = await SELF.fetch(`${BASE}/ext/${session}?token=${TOKEN}`, {
+      headers: { Upgrade: "websocket" },
+    });
+    res.webSocket!.accept(); // 受けても応答しない
+    await new Promise((r) => setTimeout(r, 50));
+    await expect(browserCookies(E, session, ["https://x.example"])).rejects.toThrow(/cdp_timeout/);
   });
 
   it("url が http(s) でなければ弾く", async () => {

@@ -471,6 +471,14 @@ async function handle(method, params, cfg, mode) {
       }
       return { value: r.result ? r.result.value : null };
     }
+    case "cookies": {
+      // Network.getCookies は HttpOnly cookie (JSESSIONID 等) も返す (document.cookie
+      // では取れない)。urls を渡して **対象 origin だけに絞る** (手元の全 cookie を
+      // 吸い上げない = blast radius を限定する)。urls 空は呼ばない (tool 側で必須化)。
+      const urls = Array.isArray(params.urls) ? params.urls : [];
+      const r = await chrome.debugger.sendCommand(target, "Network.getCookies", { urls });
+      return { cookies: (r && r.cookies) || [] };
+    }
     default:
       throw new Error("unknown method: " + method);
   }
