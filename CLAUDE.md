@@ -17,7 +17,7 @@ Cloudflare Worker+DO + stateless MCP)。
 |---|---|
 | `src/index.ts` | Worker エントリ。token 検証 + session (idFromName) で DO へ振り分け |
 | `src/do/browser-session-do.ts` | `BrowserSessionDO`。拡張 WS hold + `/cmd` 往復 + `/shot` 保存配信 |
-| `src/mcp/tools.ts` | MCP ツールの純粋ロジック (`browser_navigate` / `browser_screenshot` / `browser_eval`) |
+| `src/mcp/tools.ts` | MCP ツールの純粋ロジック (`browser_navigate` / `browser_screenshot` / `browser_eval` / `browser_stash` / `browser_cookies`) |
 | `src/mcp/server.ts` | `createWorkerMcp` 配線 (`/mcp` 到達時のみ遅延 import) |
 | `src/lib/auth.ts` | `RELAY_TOKEN` の constant-time 検証 |
 | `src/env.ts` | binding + 設定値 (vars から数値化) |
@@ -34,6 +34,32 @@ Cloudflare Worker+DO + stateless MCP)。
   WS 往復は同一インスタンスで閉じる (hibernate しない)。
 - **secret を会話 / log / tool param に出さない**。`secret-inject` skill で `RELAY_TOKEN` を投入。
 - **CCoW 内で cloudflared (cf tunnel) を立てて公開 URL から繋ぐ案は却下済み** (#10)。cloudflared は edge に UDP/TCP 7844 で接続するが CCoW egress は TCP/443 のみ。`HTTPS_PROXY` 経由の edge 接続も未対応。「拡張 → WSS/443 → Worker+DO」の dial-out 形が唯一通る。
+
+## login 委譲 (`browser_cookies`) — credential を CCoW に通さない検証
+
+`browser_cookies` (CDP `Network.getCookies`) は「**login は手元ブラウザ、認証後の
+操作は CCoW**」を成立させる tool (Refs ohishi-exp/dtako-scraper#22)。動機は
+**CCoW の egress が Anthropic egress gateway で TLS MITM 終端される**こと — CCoW
+コンテナから外部サイトへ TLS 接続すると証明書の issuer が
+`O=Anthropic, CN=Egress Gateway SDS Issuing CA` になり (実測)、login POST の
+credential は gateway 内で平文復号される。よって **credential を CCoW から送る限り
+どの経路でも gateway を平文で通る**。
+
+回避策: login (credential を使う部分) を手元ブラウザにやらせ、login 後の cookie
+だけを CCoW が借りる。credential は「手元ブラウザ → サイト」= 手元マシンの egress
+だけを通り、CCoW / gateway を一切通らない。
+
+- **cookie は生値を tool 戻り値に載せない** — session capability (hijack 可) なので
+  `browser_stash` と同じく shots に保存して `cookies_url` (= `/shot/{session}/{id}`)
+  だけ返す。回収は `curl -o /tmp/cookies.json <cookies_url>`。
+- **`urls` 必須** — 対象 origin に絞り、手元の全 cookie を吸い上げない。
+- **検証範囲の限界**: この方式で検証できるのは「cookie での認証後操作」だけ。
+  login 実装自体 (form/hidden/POST チェーン) は検証されない。login は最も壊れやすい
+  箇所なので「認証後のみ検証、login は別途」と正直に扱うこと (手元 run / devtools
+  Network 観察で別途検証)。
+- `document.cookie` (eval) では HttpOnly cookie (JSESSIONID 等) が取れないため
+  `Network.getCookies` が要る。cookie は揮発状態の read なので env vault 化とは別
+  カテゴリ (何も at-rest 保存しない)。
 
 ## ビルド / テスト
 

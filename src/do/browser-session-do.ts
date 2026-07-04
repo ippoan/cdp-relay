@@ -150,6 +150,12 @@ export class BrowserSessionDO {
     if (path.endsWith("/stash") && req.method === "POST") {
       return this.handleStash(req);
     }
+    // MCP browser_cookies → Network.getCookies の結果を shots に保存して id を返す
+    // (internal、edge 非公開)。cookie は session capability なので生値は返さず、
+    // stash と同じく id (= /shot/{session}/{id} で curl 回収) だけを返す。
+    if (path.endsWith("/cookies") && req.method === "POST") {
+      return this.handleCookies(req);
+    }
     // browser_pair tool → 短命 pairing code を mint (internal、edge では公開しない)。
     if (path.endsWith("/pair") && req.method === "POST") {
       return this.handlePair(req);
@@ -443,6 +449,69 @@ export class BrowserSessionDO {
       );
     }
     return json({ id, content_type: contentType, size_bytes: bytes.length, n_parts: nParts });
+  }
+
+  // ─── MCP browser_cookies → 手元ブラウザの cookie を取得して一時保存 ─────────────
+
+  /**
+   * 拡張に Network.getCookies を叩かせ、結果 (cookie 配列 JSON) を shots に保存して
+   * id を返す。用途 (Refs ohishi-exp/dtako-scraper#22 の cookie 委譲): 手元ブラウザで
+   * サイトに login した後の session cookie を CCoW 側が借り、login をスキップして
+   * 認証後の操作 (検索/CSV 取得等) を回すため。credential (login POST) は手元ブラウザ
+   * → サイトの経路にだけ現れ、CCoW / egress gateway を通らない。
+   *
+   * cookie は session capability (credential より下位 tier だが hijack 可) なので、
+   * 生値は tool 戻り値に載せず stash と同じ id 回収経路に固定する (呼び出し側の
+   * `curl <cookies_url>` で /tmp に落とす → runner が読む)。urls を必須にして対象
+   * origin に絞る (拡張側でも Network.getCookies に urls を渡す)。
+   */
+  private async handleCookies(req: Request): Promise<Response> {
+    const ws = this.ctx.getWebSockets()[0];
+    if (!ws) return json({ error: "extension_not_connected" }, 503);
+
+    let body: { urls?: unknown };
+    try {
+      body = (await req.json()) as typeof body;
+    } catch {
+      return json({ error: "bad_request" }, 400);
+    }
+    const urls = Array.isArray(body.urls)
+      ? body.urls.filter((u): u is string => typeof u === "string" && u !== "")
+      : [];
+    if (urls.length === 0) {
+      // 対象 origin を必須化 (手元の全 cookie を吸い上げない)。
+      return json({ error: "urls_required" }, 400);
+    }
+
+    let result: unknown;
+    try {
+      result = await this.cmdRoundtrip(ws, "cookies", { urls });
+    } catch (e) {
+      const msg = (e as Error).message;
+      return json({ error: msg }, msg === "cdp_timeout" ? 504 : 502);
+    }
+
+    // 拡張は { cookies: [...] } を返す。そのまま JSON 化して保存する。
+    const cookies =
+      result && typeof result === "object" && "cookies" in (result as Record<string, unknown>)
+        ? (result as { cookies: unknown }).cookies
+        : [];
+    const payload = JSON.stringify({ cookies });
+    const bytes = new TextEncoder().encode(payload);
+
+    const now = Date.now();
+    const ttlMs = settings(this.env).shotTtlSeconds * 1000;
+    this.sql.exec("DELETE FROM shots WHERE created_at < ?", now - ttlMs);
+    const id = crypto.randomUUID();
+    const contentType = "application/json; charset=utf-8";
+    this.sql.exec(
+      "INSERT INTO shots(id, created_at, content_type, bytes) VALUES (?, ?, ?, ?)",
+      id,
+      now,
+      contentType,
+      bytes,
+    );
+    return json({ id, content_type: contentType, size_bytes: bytes.length });
   }
 
   // ─── WS hibernation lifecycle ───────────────────────────────────────────────
