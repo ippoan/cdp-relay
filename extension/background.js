@@ -174,31 +174,48 @@ async function ensureAgentRunning(base) {
 }
 
 /**
- * popup「更新」フロー: agent を taskkill→再起動して起動時 self-update を起こし
+ * popup「更新」フロー: 手元 agent を taskkill→再起動して起動時 self-update を起こし
  * (新 dev-N binary 取得 + 拡張ファイル refresh)、disk の拡張ファイルが新しくなる猶予を
- * 置いてから拡張を再読込する。agent mode のみ agent を触る (WS mode は local agent 無し)。
- * 失敗しても最後は必ず chrome.runtime.reload() する (= 従来挙動への degrade)。
+ * 置いてから拡張を再読込する。
+ *
+ * **接続モード非依存** (CDP passthrough / WS / agent いずれでも agent を叩く)。unpacked 拡張は
+ * 自分でファイルを更新できない (Chrome 制約) ので、`git pull` 無しで最新化するには手元 agent に
+ * 拡張ファイルを上書きさせるしかない。CDP passthrough (リモート relay) でも手元 agent は接続と
+ * 独立に self-update できるため、relay モードで gate せず常に試みる。agent 未導入 (native host
+ * 未登録) なら ensureAgentFresh が即失敗 → 従来どおり reload のみに degrade する。
+ *
+ * 前提: agent が管理する拡張 dir (`<agent 実行ファイル>\extension`、= MSI 同梱の拡張) を
+ * unpacked ロードしていること。別の場所 (手動 git clone 等) の拡張は agent が上書きしないため
+ * 版が変わらない。
  */
 async function reloadAllFlow() {
+  let agentUpdated = false;
   try {
     const cfg = await loadConfig();
-    if (isAgentUrl(cfg.relayUrl)) {
-      const base = cfg.relayUrl.trim().replace(/\/+$/, "");
-      // WS を畳んでから restart (再接続が restart と競合しないように)。
-      await disconnect().catch(() => {});
-      // native {cmd:"restart"} で旧 agent を taskkill→installed 版を起動 →
-      // その startup で self-update が走り、必要なら新 dev-N へ二段再起動 + 拡張 refresh。
-      //
-      // ⚠ restart は native host (= agent 自身) を taskkill するため、sendNativeMessage の
-      // callback が返らず ensureAgentFresh が永久に hang し得る (= 「お待ちください」で固まる)。
-      // hard timeout で必ず先へ進め、最後の finally で reload を保証する。
-      await Promise.race([
-        ensureAgentFresh(base).catch((e) => log("[reload-all] restart err: " + String(e))),
-        sleep(15000),
-      ]);
-      // self-update の二段再起動 + update_extension(disk 書込) が落ち着くまでの猶予。
-      await sleep(4000);
-    }
+    // agent の ext server base。relayUrl が localhost agent ならそれ、CDP passthrough /
+    // WS (リモート relay) なら既定の ext port 19222 に固定する。
+    const agentBase = isAgentUrl(cfg.relayUrl)
+      ? cfg.relayUrl.trim().replace(/\/+$/, "")
+      : "http://127.0.0.1:19222";
+    // WS を畳んでから restart (再接続が restart と競合しないように)。
+    await disconnect().catch(() => {});
+    // native {cmd:"restart"} で旧 agent を taskkill→installed 版を起動 → その startup で
+    // self-update (exe DL + update_extension の拡張 disk 上書き) が走る。
+    //
+    // ⚠ restart は native host (= agent 自身) を taskkill するため sendNativeMessage の
+    // callback が返らないことがある。ensureAgentFresh は pingAgent で復帰を確認し、hard
+    // timeout で先へ進める。agent 未導入なら native host 未登録で即失敗 → reload のみ。
+    await Promise.race([
+      ensureAgentFresh(agentBase)
+        .then(() => {
+          agentUpdated = true;
+        })
+        .catch((e) => log("[reload-all] agent 無し/更新失敗 → reload のみ: " + String(e))),
+      sleep(15000),
+    ]);
+    // agent 更新が走った時だけ、update_extension(disk 書込) が落ち着く猶予を置く
+    // (非 agent ユーザーを無駄に待たせない)。
+    if (agentUpdated) await sleep(4000);
   } catch (e) {
     log("[reload-all] agent 再起動 skip: " + String(e));
   } finally {
