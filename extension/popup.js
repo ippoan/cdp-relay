@@ -29,12 +29,28 @@ function toggleModeFields() {
 
 /**
  * CDP passthrough モード表示の切替。CDP mode では対象タブは不要 (browser-level CDP を
- * 直接パイプする) なので隠し、Chrome CDP ポート欄を出す。
+ * 直接パイプする) なので隠し、Chrome CDP ポート欄 + 推奨起動フラグ欄を出す。
  */
 function toggleCdpFields() {
   const cdp = $("cdpMode").checked;
   $("cdpPortRow").style.display = cdp ? "" : "none";
+  $("cdpLaunchRow").style.display = cdp ? "" : "none";
   $("tabRow").style.display = cdp ? "none" : "";
+  if (cdp) refreshCdpLaunch();
+}
+
+/** ポート入力に追従して推奨 Chrome 起動フラグを組み立てる。 */
+function buildCdpLaunch() {
+  const raw = parseInt($("cdpPort").value, 10);
+  const port = Number.isFinite(raw) && raw > 0 ? raw : 9222;
+  // 拡張 SW の WS は Origin: chrome-extension://… を付けるので --remote-allow-origins
+  // が無いと :port が upgrade を拒否する。実行ファイルのパスの後ろに付けるフラグ。
+  return `--remote-debugging-port=${port} --remote-allow-origins=*`;
+}
+
+/** 推奨起動フラグを textarea に反映する (CDP mode 表示時のみ)。 */
+function refreshCdpLaunch() {
+  $("cdpLaunch").value = buildCdpLaunch();
 }
 
 async function restore() {
@@ -276,6 +292,24 @@ $("relayUrl").addEventListener("input", () => {
 // CDP passthrough チェックで対象タブ / ポート欄を切り替える。
 $("cdpMode").addEventListener("change", () => {
   toggleCdpFields();
+});
+
+// ポートを変えたら推奨起動フラグを追従させる。
+$("cdpPort").addEventListener("input", () => {
+  refreshCdpLaunch();
+});
+
+// 推奨 Chrome 起動フラグをコピー (gesture を保ったまま同期コピー)。
+$("copyCdpLaunch").addEventListener("click", () => {
+  const text = buildCdpLaunch();
+  $("cdpLaunch").value = text;
+  const ok = copyToClipboard(text);
+  setStatus(
+    ok
+      ? "Chrome 起動フラグをコピーしました（実行ファイルの後ろに付けて起動）"
+      : "コピー拒否。上の枠をクリック → Ctrl+C でコピーしてください",
+    ok ? "ok" : "err",
+  );
 });
 
 async function doConnect() {

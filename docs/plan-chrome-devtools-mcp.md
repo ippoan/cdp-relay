@@ -82,6 +82,8 @@ MV3 拡張の Service Worker 自身が bridge になる (実 Chrome :9222 ⇄ cd
    (`--remote-allow-origins` が必要: 拡張 SW の WS は `Origin: chrome-extension://…` を
    付けるので、これが無いと :9222 が upgrade を拒否する。origin を絞るなら
    `--remote-allow-origins=chrome-extension://<拡張ID>`。)
+   この起動フラグは **popup で CDP passthrough を ON にすると表示 + コピーボタン**で
+   得られる (ポートは入力欄に追従)。
 3. 拡張 popup の「接続文字列（1コピペ）」欄に `pair_string` を貼る → 自動で **CDP
    passthrough モード**が選択され接続まで走る (`connected: CDP passthrough (Chrome :9222)`)。
 4. CCoW で `chrome_devtools_mcp_command` を実行 → chrome-devtools-mcp の全ツールが効く。
