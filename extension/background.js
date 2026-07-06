@@ -381,9 +381,10 @@ async function connectInner() {
 /**
  * CDP passthrough モード: 実 Chrome (:9222) の browser-level CDP WS と cdp-relay の
  * /cdpbridge 脚を張り、フレームを無加工で双方向パイプする (= 手元 node bridge の役割を
- * 拡張 SW が担う)。前提: Chrome を `--remote-debugging-port=<port> --remote-allow-origins=*`
- * で起動していること (SW の WS は Origin: chrome-extension://… を付けるため、これが無いと
- * :9222 が upgrade を拒否する)。
+ * 拡張 SW が担う)。前提: Chrome を
+ * `--remote-debugging-port=<port> --remote-allow-origins=chrome-extension://<この拡張 id>`
+ * で起動していること (SW の WS は Origin: chrome-extension://<id> を付けるため、これが無いと
+ * :9222 が upgrade を拒否する。`*` は全 origin 許可でデバッグポート乗っ取りに繋がるため使わない)。
  */
 async function connectCdpBridge(cfg) {
   if (!cfg.session || !cfg.token) {
@@ -403,7 +404,8 @@ async function connectCdpBridge(cfg) {
     reportStatus(
       "error",
       `Chrome :${port} の CDP 取得に失敗: ${(e && e.message) || e}. ` +
-        `Chrome を --remote-debugging-port=${port} --remote-allow-origins=* で起動したか確認`,
+        `Chrome を --remote-debugging-port=${port} ` +
+        `--remote-allow-origins=chrome-extension://${chrome.runtime.id} で起動したか確認`,
     );
     return;
   }

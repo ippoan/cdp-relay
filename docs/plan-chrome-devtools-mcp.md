@@ -78,12 +78,13 @@ MV3 拡張の Service Worker 自身が bridge になる (実 Chrome :9222 ⇄ cd
 パイプ)。手元に node プロセスを常駐させなくて済む。
 
 1. CCoW で `browser_cdp_endpoint` を呼ぶ → `pair_string` (`cdp1.…`、mode=cdp) が返る。
-2. 手元 Chrome を **`--remote-debugging-port=9222 --remote-allow-origins=*`** で起動。
-   (`--remote-allow-origins` が必要: 拡張 SW の WS は `Origin: chrome-extension://…` を
-   付けるので、これが無いと :9222 が upgrade を拒否する。origin を絞るなら
-   `--remote-allow-origins=chrome-extension://<拡張ID>`。)
+2. 手元 Chrome を
+   **`--remote-debugging-port=9222 --remote-allow-origins=chrome-extension://<拡張ID>`** で起動。
+   (`--remote-allow-origins` が必要: 拡張 SW の WS は `Origin: chrome-extension://<id>` を
+   付けるので、これが無いと :9222 が upgrade を拒否する。**`*` は全 origin 許可 = 任意の
+   Web ページから localhost の CDP を乗っ取られるため使わない**。拡張 id だけを許可する。)
    この起動フラグは **popup で CDP passthrough を ON にすると表示 + コピーボタン**で
-   得られる (ポートは入力欄に追従)。
+   得られる (拡張 id と入力ポートが埋め込まれた正確な形。ポートは入力欄に追従)。
 3. 拡張 popup の「接続文字列（1コピペ）」欄に `pair_string` を貼る → 自動で **CDP
    passthrough モード**が選択され接続まで走る (`connected: CDP passthrough (Chrome :9222)`)。
 4. CCoW で `chrome_devtools_mcp_command` を実行 → chrome-devtools-mcp の全ツールが効く。
@@ -109,8 +110,10 @@ MV3 拡張の Service Worker 自身が bridge になる (実 Chrome :9222 ⇄ cd
 
 ## 既知の限界 / TODO
 
-- 方式 A (拡張) は Chrome の起動フラグに **`--remote-allow-origins`** が要る (SW の WS
-  が Origin を付けるため)。方式 B (node bridge) は不要。
+- 方式 A (拡張) は Chrome の起動フラグに **`--remote-allow-origins=chrome-extension://<拡張ID>`**
+  が要る (SW の WS が Origin を付けるため)。`*` (全 origin) はデバッグポート乗っ取りに繋がるので
+  使わない — 拡張 id だけ許可する (popup がその正確な形をコピー可能に表示)。方式 B (node
+  bridge) は Origin を付けないので `--remote-allow-origins` 自体が不要。
 - 方式 A は MV3 Service Worker の idle 停止に晒される。active CDP トラフィックと
   keepalive `"ping"` (24s、DO が握り潰す) で延命するが、長時間の完全 idle 後は SW が
   落ちて再接続が要ることがある。常駐が要る用途は方式 B (node) が確実。

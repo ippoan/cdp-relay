@@ -169,7 +169,10 @@ export interface CdpEndpointResult {
    * cdp-relay MV3 拡張の「接続文字列（1コピペ）」欄に貼る 1 文字列 (`cdp1.…`、mode=cdp)。
    * これを貼ると拡張が **CDP passthrough モード**で接続し、手元の `node bridge` が不要になる
    * (拡張の Service Worker が実 Chrome :9222 ⇄ cdp-relay を直接パイプする)。
-   * この場合 Chrome は `--remote-debugging-port=9222 --remote-allow-origins=*` で起動する。
+   * この場合 Chrome は
+   * `--remote-debugging-port=9222 --remote-allow-origins=chrome-extension://<拡張 id>` で起動する
+   * (この起動フラグは拡張 popup が CDP passthrough ON 時にコピー可能な形で表示。`*` は全 origin
+   * 許可 = デバッグポート乗っ取りに繋がるため使わない)。
    */
   pair_string: string;
 }
