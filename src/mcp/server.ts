@@ -87,7 +87,9 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
             "CCoW の chrome-devtools-mcp が --wsEndpoint で合流するので **chrome-devtools-mcp の全ツール** が効く。" +
             "返り値: ws_endpoint / bridge_command / chrome_devtools_mcp_command / pair_string。" +
             "手元 bridge は 2 通り: **(A 推奨) 拡張だけで完結** — Chrome を " +
-            "--remote-debugging-port=9222 --remote-allow-origins=* で起動し、pair_string を拡張 popup の " +
+            "--remote-debugging-port=9222 --remote-allow-origins=chrome-extension://<拡張 id> " +
+            "(この起動フラグは拡張 popup が CDP passthrough ON 時にコピー可能な形で表示。`*` は全 origin 許可 " +
+            "= デバッグポート乗っ取りに繋がるため使わない) で起動し、pair_string を拡張 popup の " +
             "「接続文字列（1コピペ）」欄に貼る (node 不要、拡張 SW が bridge になる)。" +
             "**(B) node bridge** — Chrome を --remote-debugging-port=9222 で起動し bridge_command を実行。" +
             "どちらも最後に CCoW で chrome_devtools_mcp_command を実行。pair_code は短命 (既定 15 分)・session スコープ。",

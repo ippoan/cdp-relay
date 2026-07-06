@@ -43,9 +43,11 @@ function toggleCdpFields() {
 function buildCdpLaunch() {
   const raw = parseInt($("cdpPort").value, 10);
   const port = Number.isFinite(raw) && raw > 0 ? raw : 9222;
-  // 拡張 SW の WS は Origin: chrome-extension://… を付けるので --remote-allow-origins
-  // が無いと :port が upgrade を拒否する。実行ファイルのパスの後ろに付けるフラグ。
-  return `--remote-debugging-port=${port} --remote-allow-origins=*`;
+  // 拡張 SW の WS は Origin: chrome-extension://<id> を付けるので --remote-allow-origins
+  // が無いと :port が upgrade を拒否する。**この拡張 id だけ**を許可する (chrome.runtime.id は
+  // SW の Origin と同じ id に解決する)。`*` は全 origin 許可 = 任意の Web ページから
+  // localhost の CDP を乗っ取られるため使わない (デバッグポート乗っ取り対策)。
+  return `--remote-debugging-port=${port} --remote-allow-origins=chrome-extension://${chrome.runtime.id}`;
 }
 
 /** 推奨起動フラグを textarea に反映する (CDP mode 表示時のみ)。 */
