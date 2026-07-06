@@ -22,6 +22,7 @@ import { createWorkerMcp } from "@ippoan/mcp-cf-workers";
 import { z } from "zod";
 import type { Env } from "../env";
 import {
+  browserCdpEndpoint,
   browserCookies,
   browserEval,
   browserNavigate,
@@ -70,6 +71,37 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
         async ({ session, ttl_seconds }: { session?: string; ttl_seconds?: number }) => {
           try {
             return ok(await browserPair(env, session, ttl_seconds));
+          } catch (e) {
+            return fail(e);
+          }
+        },
+      );
+
+      server.registerTool(
+        "browser_cdp_endpoint",
+        {
+          description:
+            "chrome-devtools-mcp を cdp-relay 経由で手元 Chrome に繋ぐ一式を発行する (生 CDP passthrough)。" +
+            "curated な browser_navigate/eval 等 (chrome.debugger のタブ単位・厳選 verb) と違い、" +
+            "手元 bridge が実 Chrome の browser-level CDP (--remote-debugging-port=9222) を中継し、" +
+            "CCoW の chrome-devtools-mcp が --wsEndpoint で合流するので **chrome-devtools-mcp の全ツール** が効く。" +
+            "返り値: ws_endpoint / bridge_command / chrome_devtools_mcp_command。手順は " +
+            "(1) 手元 Chrome を --remote-debugging-port=9222 で起動 (2) 手元で bridge_command を実行 " +
+            "(3) CCoW で chrome_devtools_mcp_command を実行。pair_code は短命 (既定 15 分)・session スコープ。",
+          inputSchema: {
+            session: z
+              .string()
+              .optional()
+              .describe("ペアリング先 session 名。省略時はランダム採番 (pair-xxxxxxxx)"),
+            ttl_seconds: z
+              .number()
+              .optional()
+              .describe("pair_code の有効秒数 (既定 900、最大 86400)"),
+          },
+        },
+        async ({ session, ttl_seconds }: { session?: string; ttl_seconds?: number }) => {
+          try {
+            return ok(await browserCdpEndpoint(env, session, ttl_seconds));
           } catch (e) {
             return fail(e);
           }
