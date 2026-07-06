@@ -129,11 +129,15 @@ export async function browserPair(
 
 /**
  * relay_url / session / pair_code を 1 コピペ用の 1 文字列に pack する。
- * 形式は `cdp1.<base64url(JSON{r,s,t})>`。拡張 popup 側が同形式を decode して 3 欄を埋める。
+ * 形式は `cdp1.<base64url(JSON{r,s,t[,m]})>`。拡張 popup 側が同形式を decode して欄を埋める。
+ * `mode` を渡すと `m` を載せ、拡張がその接続モードを自動選択する
+ * ("cdp" = chrome-devtools-mcp passthrough。省略時は curated ext モード)。
  * pair_code は短命・session スコープなので会話に出してよい (RELAY_TOKEN とは別物)。
  */
-function packPairString(relay: string, session: string, code: string): string {
-  const json = JSON.stringify({ r: relay, s: session, t: code });
+function packPairString(relay: string, session: string, code: string, mode?: string): string {
+  const payload: Record<string, string> = { r: relay, s: session, t: code };
+  if (mode) payload.m = mode;
+  const json = JSON.stringify(payload);
   const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(json)));
   return "cdp1." + b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
@@ -161,6 +165,13 @@ export interface CdpEndpointResult {
   bridge_command: string;
   /** CCoW でそのまま叩ける chrome-devtools-mcp 起動コマンド。 */
   chrome_devtools_mcp_command: string;
+  /**
+   * cdp-relay MV3 拡張の「接続文字列（1コピペ）」欄に貼る 1 文字列 (`cdp1.…`、mode=cdp)。
+   * これを貼ると拡張が **CDP passthrough モード**で接続し、手元の `node bridge` が不要になる
+   * (拡張の Service Worker が実 Chrome :9222 ⇄ cdp-relay を直接パイプする)。
+   * この場合 Chrome は `--remote-debugging-port=9222 --remote-allow-origins=*` で起動する。
+   */
+  pair_string: string;
 }
 
 /**
@@ -213,6 +224,7 @@ export async function browserCdpEndpoint(
     ws_endpoint: wsEndpoint,
     bridge_command: `node bridge/cdp-bridge.mjs --session ${s} --token ${code}`,
     chrome_devtools_mcp_command: `npx chrome-devtools-mcp@latest --wsEndpoint "${wsEndpoint}"`,
+    pair_string: packPairString(relay, s, code, "cdp"),
   };
 }
 

@@ -4,6 +4,12 @@ CCoW の chrome-devtools-mcp から cdp-relay 経由で **手元 Chrome を生 C
 ための、手元で走らせる依存ゼロ (Node 18+) のブリッジ。設計は
 [`../docs/plan-chrome-devtools-mcp.md`](../docs/plan-chrome-devtools-mcp.md)。
 
+> **多くの場合これは不要**: cdp-relay MV3 拡張の **CDP passthrough モード**
+> (`browser_cdp_endpoint` の `pair_string` を popup に貼るだけ) を使えば、拡張の
+> Service Worker が同じ役割を担うので node bridge を常駐させなくて済む。この
+> スクリプト (方式 B) は、拡張を使いたくない / SW の idle 停止を避けて常駐させたい
+> 場合の代替。詳細は plan doc の「使い方」を参照。
+
 実 Chrome (`--remote-debugging-port=9222`) の browser-level CDP WebSocket を、
 cdp-relay の `/cdpbridge/{session}` に outbound WSS で繋いで無加工パイプする。
 

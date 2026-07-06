@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "cdp-relay",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "手元 Chrome を cdp-relay Worker 経由で CCoW / MCP から CDP 操作させる中継拡張。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAohlPHbhk4o/WnfPvXdcq6a5RPuAZXkNd67sJuWDGRlo8npgUk+YZn5OD7toIBfnTLod37eENGTsKKeMk6TVci7WK/KC32uEYlyIi13MAOy/Vwr9QDXVq45H4nT0sHiYtciwpg1zy8mbzFL0Z8jEe8kKwXw12tLu2QvGe6xCgw+ZsbHkoBU496ZQGUJNDPNyvp0jMYrOfsrPpQUcsPes25bArrLtagBmvD9n55HDAaI21JTJYxpiwVRdYSxrZRGo/OgJWpnQ0+3KcB/XFuRXWdVRCLM8+IsmXzCzIP0ZLk0T31XISNh7ih2fYn0SZy3CTAcuZlSINUuBJFomDO9GH8QIDAQAB",
   "permissions": ["debugger", "tabs", "storage", "alarms", "nativeMessaging"],

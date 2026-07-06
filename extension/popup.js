@@ -27,16 +27,35 @@ function toggleModeFields() {
   $("tokenRow").style.display = agent ? "none" : "";
 }
 
+/**
+ * CDP passthrough モード表示の切替。CDP mode では対象タブは不要 (browser-level CDP を
+ * 直接パイプする) なので隠し、Chrome CDP ポート欄を出す。
+ */
+function toggleCdpFields() {
+  const cdp = $("cdpMode").checked;
+  $("cdpPortRow").style.display = cdp ? "" : "none";
+  $("tabRow").style.display = cdp ? "none" : "";
+}
+
 async function restore() {
   // 現在の拡張バージョンを表示 (manifest.json の version)。agent version は後で併記。
   extVer = chrome.runtime.getManifest().version;
   renderVer();
 
-  const c = await chrome.storage.local.get(["relayUrl", "session", "token", "tabId"]);
+  const c = await chrome.storage.local.get([
+    "relayUrl",
+    "session",
+    "token",
+    "tabId",
+    "cdpMode",
+    "cdpPort",
+  ]);
   // 未設定なら手元 agent (固定 ext port 19222) を既定で埋める。
   $("relayUrl").value = c.relayUrl || "http://127.0.0.1:19222";
   if (c.session) $("session").value = c.session;
   if (c.token) $("token").value = c.token;
+  $("cdpMode").checked = !!c.cdpMode;
+  $("cdpPort").value = c.cdpPort ? String(c.cdpPort) : "9222";
 
   // 現ウィンドウのタブ一覧を埋める。
   const tabs = await chrome.tabs.query({ currentWindow: true });
@@ -56,6 +75,8 @@ async function restore() {
 
   // agent / WS mode に応じて session/token の表示を切り替える。
   toggleModeFields();
+  // CDP passthrough mode に応じて対象タブ / ポート欄を切り替える。
+  toggleCdpFields();
 
   // 既に溜まっている debug ログを取り出してパネルに描画する。
   loadLogs();
@@ -72,11 +93,14 @@ function setStatus(text, cls) {
 }
 
 async function save() {
+  const port = parseInt($("cdpPort").value, 10);
   await chrome.storage.local.set({
     relayUrl: $("relayUrl").value.trim(),
     session: $("session").value.trim(),
     token: $("token").value,
     tabId: Number($("tab").value),
+    cdpMode: $("cdpMode").checked,
+    cdpPort: Number.isFinite(port) && port > 0 ? port : 9222,
   });
 }
 
@@ -249,6 +273,11 @@ $("relayUrl").addEventListener("input", () => {
   toggleModeFields();
 });
 
+// CDP passthrough チェックで対象タブ / ポート欄を切り替える。
+$("cdpMode").addEventListener("change", () => {
+  toggleCdpFields();
+});
+
 async function doConnect() {
   await save();
   setStatus("接続中…");
@@ -274,7 +303,14 @@ function parsePairString(s) {
     while (b64.length % 4) b64 += "=";
     const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
     const o = JSON.parse(new TextDecoder().decode(bytes));
-    if (o && o.r && o.s && o.t) return { relay: String(o.r), session: String(o.s), token: String(o.t) };
+    // m は接続モード ("cdp" = chrome-devtools-mcp passthrough、省略時は curated)。
+    if (o && o.r && o.s && o.t)
+      return {
+        relay: String(o.r),
+        session: String(o.s),
+        token: String(o.t),
+        mode: typeof o.m === "string" ? o.m : "",
+      };
   } catch {
     /* 不正な文字列は無視 */
   }
@@ -289,9 +325,16 @@ $("combo").addEventListener("input", async () => {
   $("relayUrl").value = p.relay;
   $("session").value = p.session;
   $("token").value = p.token;
+  // mode=cdp の接続文字列 (browser_cdp_endpoint) は CDP passthrough モードを自動選択。
+  $("cdpMode").checked = p.mode === "cdp";
   $("combo").value = "";
   toggleModeFields();
-  setStatus("接続文字列を読み込みました。接続中…");
+  toggleCdpFields();
+  setStatus(
+    p.mode === "cdp"
+      ? "接続文字列 (CDP passthrough) を読み込みました。接続中…"
+      : "接続文字列を読み込みました。接続中…",
+  );
   await doConnect();
 });
 

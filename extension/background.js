@@ -20,6 +20,11 @@
 let ws = null;
 let attachedTabId = null;
 let agentRunning = false;
+// CDP passthrough モード (chrome-devtools-mcp 連携): 拡張自身が bridge になり、
+// 実 Chrome (:9222) の browser-level CDP WS と cdp-relay の /cdpbridge 脚を直接パイプ
+// する (手元 node bridge が不要)。cdpLocal = 実 Chrome、cdpRemote = cdp-relay。
+let cdpLocal = null;
+let cdpRemote = null;
 // 接続処理中フラグ。SW 起動直後の自動再接続 (top-level) と onAlarm / popup が
 // 同時に connect() を呼んでも二重接続しないように guard する。
 let connecting = false;
@@ -204,12 +209,21 @@ async function reloadAllFlow() {
 
 /** popup / storage の設定を読む。Relay URL 未設定なら手元 agent (19222) に fallback。 */
 async function loadConfig() {
-  const c = await chrome.storage.local.get(["relayUrl", "session", "token", "tabId"]);
+  const c = await chrome.storage.local.get([
+    "relayUrl",
+    "session",
+    "token",
+    "tabId",
+    "cdpMode",
+    "cdpPort",
+  ]);
   return {
     relayUrl: c.relayUrl || "http://127.0.0.1:19222",
     session: c.session || "",
     token: c.token || "",
     tabId: typeof c.tabId === "number" ? c.tabId : null,
+    cdpMode: !!c.cdpMode,
+    cdpPort: typeof c.cdpPort === "number" && c.cdpPort > 0 ? c.cdpPort : 9222,
   };
 }
 
@@ -267,6 +281,15 @@ async function connectInner() {
     reportStatus("error", "Relay URL が未設定");
     return;
   }
+
+  // CDP passthrough モード: 拡張自身が実 Chrome :9222 ⇄ cdp-relay を中継する
+  // (chrome-devtools-mcp 連携、手元 node bridge 不要)。対象タブ / chrome.debugger
+  // attach は使わない (browser-level CDP を直接パイプするため)。
+  if (cfg.cdpMode) {
+    await connectCdpBridge(cfg);
+    return;
+  }
+
   if (cfg.tabId == null) {
     reportStatus("error", "対象タブ未選択");
     return;
@@ -355,6 +378,106 @@ async function connectInner() {
   };
 }
 
+/**
+ * CDP passthrough モード: 実 Chrome (:9222) の browser-level CDP WS と cdp-relay の
+ * /cdpbridge 脚を張り、フレームを無加工で双方向パイプする (= 手元 node bridge の役割を
+ * 拡張 SW が担う)。前提: Chrome を `--remote-debugging-port=<port> --remote-allow-origins=*`
+ * で起動していること (SW の WS は Origin: chrome-extension://… を付けるため、これが無いと
+ * :9222 が upgrade を拒否する)。
+ */
+async function connectCdpBridge(cfg) {
+  if (!cfg.session || !cfg.token) {
+    reportStatus("error", "session / token が未設定 (CDP mode)");
+    return;
+  }
+  await disconnect();
+
+  const port = cfg.cdpPort || 9222;
+  // 実 Chrome の browser-level CDP WS エンドポイントを /json/version から引く。
+  let browserWsUrl;
+  try {
+    const info = await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json());
+    browserWsUrl = info && info.webSocketDebuggerUrl;
+    if (!browserWsUrl) throw new Error("webSocketDebuggerUrl が無い");
+  } catch (e) {
+    reportStatus(
+      "error",
+      `Chrome :${port} の CDP 取得に失敗: ${(e && e.message) || e}. ` +
+        `Chrome を --remote-debugging-port=${port} --remote-allow-origins=* で起動したか確認`,
+    );
+    return;
+  }
+
+  const wssBase = toWssBase(cfg.relayUrl);
+  const relayUrl = `${wssBase}/cdpbridge/${encodeURIComponent(cfg.session)}?token=${encodeURIComponent(cfg.token)}`;
+
+  const local = new WebSocket(browserWsUrl); // 実 Chrome (browser-level CDP)
+  const remote = new WebSocket(relayUrl); // cdp-relay の bridge 脚
+  cdpLocal = local;
+  cdpRemote = remote;
+
+  // 相手がまだ開いていない間のフレームをバッファ (取りこぼし防止)。
+  const toLocal = [];
+  const toRemote = [];
+  const flush = () => {
+    if (local.readyState === WebSocket.OPEN) while (toLocal.length) local.send(toLocal.shift());
+    if (remote.readyState === WebSocket.OPEN) while (toRemote.length) remote.send(toRemote.shift());
+  };
+  const bothOpen = () => local.readyState === WebSocket.OPEN && remote.readyState === WebSocket.OPEN;
+
+  local.onopen = () => {
+    log("cdp local (Chrome) open");
+    flush();
+    if (bothOpen()) markCdpConnected(cfg, port);
+  };
+  remote.onopen = () => {
+    log("cdp remote (cdp-relay) open");
+    flush();
+    if (bothOpen()) markCdpConnected(cfg, port);
+  };
+
+  // chrome-devtools-mcp → cdp-relay → (remote) → local (Chrome)
+  remote.onmessage = (ev) => {
+    if (local.readyState === WebSocket.OPEN) local.send(ev.data);
+    else toLocal.push(ev.data);
+  };
+  // Chrome (local) → (remote) → cdp-relay → chrome-devtools-mcp
+  local.onmessage = (ev) => {
+    if (remote.readyState === WebSocket.OPEN) remote.send(ev.data);
+    else toRemote.push(ev.data);
+  };
+
+  const teardown = (why) => {
+    log("cdp session end: " + why);
+    try {
+      local.close();
+    } catch {
+      /* noop */
+    }
+    try {
+      remote.close();
+    } catch {
+      /* noop */
+    }
+    if (cdpLocal === local) cdpLocal = null;
+    if (cdpRemote === remote) cdpRemote = null;
+    reportStatus("disconnected", "CDP passthrough closed (" + why + ")");
+  };
+  local.onclose = (e) => teardown(`local closed (${e.code})`);
+  remote.onclose = (e) => teardown(`remote closed (${e.code} ${e.reason || ""})`);
+  local.onerror = () => teardown("local error");
+  remote.onerror = () => teardown("remote error");
+}
+
+/** cdp bridge の両脚が open した時: 接続意図を永続化し keepalive alarm を張る。 */
+function markCdpConnected(cfg, port) {
+  chrome.storage.local.set({ autoConnect: true });
+  // MV3 SW は idle で停止するので周期的に起こす。onAlarm が cdpRemote に "ping" を
+  // 送って WS 活動として SW を延命する ("ping" は DO 側で握り潰され client に流れない)。
+  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 }); // ~24s
+  reportStatus("connected", `CDP passthrough (Chrome :${port}) session=${cfg.session}`);
+}
+
 /** agent モード: ext port に long-poll して CDP コマンドを往復する。 */
 async function agentLoop(cfg) {
   const base = cfg.relayUrl.trim().replace(/\/+$/, "");
@@ -411,6 +534,23 @@ async function disconnect() {
       /* noop */
     }
     ws = null;
+  }
+  // CDP passthrough の 2 脚も畳む。
+  if (cdpLocal) {
+    try {
+      cdpLocal.close();
+    } catch {
+      /* noop */
+    }
+    cdpLocal = null;
+  }
+  if (cdpRemote) {
+    try {
+      cdpRemote.close();
+    } catch {
+      /* noop */
+    }
+    cdpRemote = null;
   }
   if (attachedTabId != null) {
     try {
@@ -564,6 +704,15 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
       ws.send("ping");
+    } catch {
+      /* noop */
+    }
+    return;
+  }
+  // CDP passthrough: cdpRemote に "ping" を送って SW を延命する (DO が握り潰す)。
+  if (cdpRemote && cdpRemote.readyState === WebSocket.OPEN) {
+    try {
+      cdpRemote.send("ping");
     } catch {
       /* noop */
     }

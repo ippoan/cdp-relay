@@ -55,6 +55,16 @@
           <input id="token" type="password" placeholder="pair token (WS mode のみ)" />
         </div>
         <div class="row">
+          <label style="font-weight: 600;">
+            <input type="checkbox" id="cdpMode" style="width: auto; vertical-align: middle;" />
+            chrome-devtools-mcp (CDP passthrough)
+          </label>
+        </div>
+        <div class="row" id="cdpPortRow" style="display: none;">
+          <label for="cdpPort">Chrome CDP ポート (--remote-debugging-port)</label>
+          <input id="cdpPort" placeholder="9222" />
+        </div>
+        <div class="row" id="tabRow">
           <label for="tab">対象タブ</label>
           <select id="tab"></select>
         </div>

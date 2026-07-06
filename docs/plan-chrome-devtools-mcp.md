@@ -68,14 +68,31 @@ CCoW の chrome-devtools-mcp から、cdp-relay を経由して手元 Chrome を
 - pairing code は `browser_pair` と同じ短命 (既定 15 分)・session スコープ。値は会話に
   出してよい (静的 RELAY_TOKEN とは別物)。
 
-## 使い方 (CCoW 側)
+## 使い方
 
-1. CCoW で `browser_cdp_endpoint` tool を呼ぶ → `ws_endpoint` / `bridge_command` /
-   `chrome_devtools_mcp_command` が返る。
-2. 手元 Chrome を `--remote-debugging-port=9222` で起動 (ショートカット可)。
+`browser_cdp_endpoint` tool が返す値で、手元 bridge には **2 通り**ある。
+
+### A. 拡張だけで完結 (推奨、node bridge 不要)
+
+MV3 拡張の Service Worker 自身が bridge になる (実 Chrome :9222 ⇄ cdp-relay を直接
+パイプ)。手元に node プロセスを常駐させなくて済む。
+
+1. CCoW で `browser_cdp_endpoint` を呼ぶ → `pair_string` (`cdp1.…`、mode=cdp) が返る。
+2. 手元 Chrome を **`--remote-debugging-port=9222 --remote-allow-origins=*`** で起動。
+   (`--remote-allow-origins` が必要: 拡張 SW の WS は `Origin: chrome-extension://…` を
+   付けるので、これが無いと :9222 が upgrade を拒否する。origin を絞るなら
+   `--remote-allow-origins=chrome-extension://<拡張ID>`。)
+3. 拡張 popup の「接続文字列（1コピペ）」欄に `pair_string` を貼る → 自動で **CDP
+   passthrough モード**が選択され接続まで走る (`connected: CDP passthrough (Chrome :9222)`)。
+4. CCoW で `chrome_devtools_mcp_command` を実行 → chrome-devtools-mcp の全ツールが効く。
+
+### B. 手元 node bridge (拡張を使わない)
+
+1. CCoW で `browser_cdp_endpoint` を呼ぶ。
+2. 手元 Chrome を `--remote-debugging-port=9222` で起動 (`--remote-allow-origins` は不要
+   — node の WS は Origin を付けないため)。
 3. 手元で `bridge_command` (= `node bridge/cdp-bridge.mjs --session … --token …`) を実行。
-4. CCoW で `chrome_devtools_mcp_command` (= `npx chrome-devtools-mcp@latest
-   --wsEndpoint "…"`) を実行 → chrome-devtools-mcp の全ツールが手元ブラウザに効く。
+4. CCoW で `chrome_devtools_mcp_command` を実行。
 
 ## 実装したもの
 
@@ -84,14 +101,20 @@ CCoW の chrome-devtools-mcp から、cdp-relay を経由して手元 Chrome を
 | `src/index.ts` | `/cdpbridge/{session}` と `/cdp/{session}/…` の WS upgrade routing (edgeAuth) |
 | `src/do/browser-session-do.ts` | `handleCdpLeg` (2 脚 hold) / `forwardCdp` (無加工転送) / `teardownCdpPeer`。既存 ext 脚は tag `ext` に分離 |
 | `src/mcp/tools.ts` + `server.ts` | `browser_cdp_endpoint` tool (pair mint + wsEndpoint / bridge / mcp コマンド生成) |
-| `bridge/cdp-bridge.mjs` | 手元で走らせる依存ゼロの CDP ブリッジ (実 :9222 ⇅ cdp-relay) |
-| `test/cdp.test.ts` | passthrough の auth / 503 fail-fast / 双方向転送 / peer teardown |
+| `bridge/cdp-bridge.mjs` | 手元で走らせる依存ゼロの CDP ブリッジ (実 :9222 ⇅ cdp-relay)。方式 B 用 |
+| `extension/` | MV3 拡張に **CDP passthrough モード**を追加 (方式 A、`background.js` の `connectCdpBridge` + popup チェックボックス)。SW 延命の keepalive `"ping"` は DO が握り潰す |
+| `test/cdp.test.ts` | passthrough の auth / 503 fail-fast / 双方向転送 / keepalive 握り潰し / peer teardown |
 
 ## 既知の限界 / TODO
 
-- **bridge プロセスが要る** (拡張だけでは完結しない)。将来 `cdp-agent` (MSI + Native
-  Messaging) に bridge モードを畳み込めば手元セットアップを自動化できる (別 PR)。
-- bridge は client 切断ごとに実 Chrome WS を張り直す (= 毎回クリーンな CDP 状態)。
-  張り直しの一瞬は client が 503 になり得る (bridge の再接続は速いので実害小)。
+- 方式 A (拡張) は Chrome の起動フラグに **`--remote-allow-origins`** が要る (SW の WS
+  が Origin を付けるため)。方式 B (node bridge) は不要。
+- 方式 A は MV3 Service Worker の idle 停止に晒される。active CDP トラフィックと
+  keepalive `"ping"` (24s、DO が握り潰す) で延命するが、長時間の完全 idle 後は SW が
+  落ちて再接続が要ることがある。常駐が要る用途は方式 B (node) が確実。
+- node bridge (方式 B) は client 切断ごとに実 Chrome WS を張り直す (= 毎回クリーンな
+  CDP 状態)。張り直しの一瞬は client が 503 になり得る (再接続は速いので実害小)。
 - 32 MiB を超える単一 CDP フレームは通らない (通常の操作では出ないが、巨大な
   `Page.printToPDF` 等は理論上上限に当たる)。
+- 将来 `cdp-agent` (MSI + Native Messaging) に bridge モードを畳み込めば、Chrome 起動
+  フラグ付与まで含めて手元セットアップを完全自動化できる (別 PR)。
