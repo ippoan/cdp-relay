@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
 import {
+  browserCdpEndpoint,
   browserCookies,
   browserEval,
   browserNavigate,
@@ -275,5 +276,32 @@ describe("MCP tools (/cmd 往復)", () => {
 
   it("空 session を弾く", async () => {
     await expect(browserNavigate(E, "", "https://example.com")).rejects.toThrow(/session is required/);
+  });
+});
+
+describe("browser_cdp_endpoint (chrome-devtools-mcp passthrough)", () => {
+  it("wsEndpoint / bridge / mcp コマンド + CDP mode の pair_string を返す", async () => {
+    const session = "cdpep-" + crypto.randomUUID();
+    const r = await browserCdpEndpoint(E, session, 600);
+    expect(r.session).toBe(session);
+    expect(r.pair_code).toMatch(/^[0-9a-f]{64}$/);
+    expect(r.expires_in_seconds).toBe(600);
+    // wsEndpoint は wss + /cdp/{session}/devtools/browser?token=pair_code。
+    expect(r.ws_endpoint).toBe(
+      `wss://cdp-relay.test/cdp/${session}/devtools/browser?token=${r.pair_code}`,
+    );
+    expect(r.chrome_devtools_mcp_command).toContain(`--wsEndpoint "${r.ws_endpoint}"`);
+    expect(r.bridge_command).toContain(`--session ${session} --token ${r.pair_code}`);
+    // pair_string は cdp1.… で decode すると mode=cdp を含む (拡張が CDP mode を自動選択)。
+    expect(r.pair_string).toMatch(/^cdp1\./);
+    let b64 = r.pair_string.slice(5).replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const decoded = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))));
+    expect(decoded).toMatchObject({ s: session, t: r.pair_code, m: "cdp" });
+  });
+
+  it("session 省略時は pair-xxxxxxxx を採番する", async () => {
+    const r = await browserCdpEndpoint(E);
+    expect(r.session).toMatch(/^pair-[0-9a-f]{8}$/);
   });
 });

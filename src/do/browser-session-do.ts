@@ -583,8 +583,14 @@ export class BrowserSessionDO {
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     // cdp passthrough 脚は相手へ無加工転送 (curated 相関を通さない)。
     const tags = this.ctx.getTags(ws);
-    if (tags.includes("cdp-client")) return this.forwardCdp("cdp-client", message);
-    if (tags.includes("cdp-bridge")) return this.forwardCdp("cdp-bridge", message);
+    if (tags.includes("cdp-client") || tags.includes("cdp-bridge")) {
+      // 拡張 bridge (MV3 SW) が接続を生かすための keepalive。生 CDP は JSON なので
+      // 素の "ping" 文字列を相手脚へ転送すると puppeteer / Chrome が壊れる。ここで
+      // 握り潰す (WS 活動としては成立するので SW 延命の目的は果たす)。
+      if (typeof message === "string" && message === "ping") return;
+      const from = tags.includes("cdp-client") ? "cdp-client" : "cdp-bridge";
+      return this.forwardCdp(from, message);
+    }
 
     let parsed: { id?: unknown; result?: unknown; error?: unknown };
     try {

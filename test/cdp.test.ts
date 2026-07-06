@@ -95,6 +95,21 @@ describe("raw CDP passthrough (chrome-devtools-mcp)", () => {
     client.close();
   });
 
+  it('bridge の keepalive "ping" は client へ転送されない (握り潰し)', async () => {
+    const session = "cdp-" + crypto.randomUUID();
+    const bridge = await openWs(`/cdpbridge/${session}?token=${TOKEN}`);
+    const client = await openWs(`/cdp/${session}/devtools/browser?token=${TOKEN}`);
+
+    const onClient = nextMessage(client);
+    bridge.send("ping"); // keepalive: DO が握り潰す (client に流れない)
+    const real = JSON.stringify({ id: 7, result: { ok: true } });
+    bridge.send(real); // 直後の実フレームだけが届くはず
+    expect(await onClient).toBe(real);
+
+    bridge.close();
+    client.close();
+  });
+
   it("bridge が閉じると client 脚も切断される (peer teardown)", async () => {
     const session = "cdp-" + crypto.randomUUID();
     const bridge = await openWs(`/cdpbridge/${session}?token=${TOKEN}`);

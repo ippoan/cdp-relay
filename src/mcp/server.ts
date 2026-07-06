@@ -85,9 +85,12 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
             "curated な browser_navigate/eval 等 (chrome.debugger のタブ単位・厳選 verb) と違い、" +
             "手元 bridge が実 Chrome の browser-level CDP (--remote-debugging-port=9222) を中継し、" +
             "CCoW の chrome-devtools-mcp が --wsEndpoint で合流するので **chrome-devtools-mcp の全ツール** が効く。" +
-            "返り値: ws_endpoint / bridge_command / chrome_devtools_mcp_command。手順は " +
-            "(1) 手元 Chrome を --remote-debugging-port=9222 で起動 (2) 手元で bridge_command を実行 " +
-            "(3) CCoW で chrome_devtools_mcp_command を実行。pair_code は短命 (既定 15 分)・session スコープ。",
+            "返り値: ws_endpoint / bridge_command / chrome_devtools_mcp_command / pair_string。" +
+            "手元 bridge は 2 通り: **(A 推奨) 拡張だけで完結** — Chrome を " +
+            "--remote-debugging-port=9222 --remote-allow-origins=* で起動し、pair_string を拡張 popup の " +
+            "「接続文字列（1コピペ）」欄に貼る (node 不要、拡張 SW が bridge になる)。" +
+            "**(B) node bridge** — Chrome を --remote-debugging-port=9222 で起動し bridge_command を実行。" +
+            "どちらも最後に CCoW で chrome_devtools_mcp_command を実行。pair_code は短命 (既定 15 分)・session スコープ。",
           inputSchema: {
             session: z
               .string()
