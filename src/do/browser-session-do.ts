@@ -142,6 +142,15 @@ export class BrowserSessionDO {
     if (path.startsWith("/ext/") && req.headers.get("Upgrade") === "websocket") {
       return this.handleExt(req);
     }
+    // chrome-devtools-mcp (raw CDP passthrough) の 2 脚。DO は中身を解釈せず、
+    // bridge (手元 → 実 Chrome :9222) 脚と client (puppeteer --wsEndpoint) 脚の
+    // フレームを無加工で双方向に流すだけ (curated な /ext + /cmd 経路とは別ルート)。
+    if (path.startsWith("/cdpbridge/") && req.headers.get("Upgrade") === "websocket") {
+      return this.handleCdpLeg(req, "cdp-bridge");
+    }
+    if (path.startsWith("/cdp/") && req.headers.get("Upgrade") === "websocket") {
+      return this.handleCdpLeg(req, "cdp-client");
+    }
     // MCP tool → CDP コマンド投入 (internal、edge では公開しない)。
     if (path.endsWith("/cmd") && req.method === "POST") {
       return this.handleCmd(req);
@@ -281,10 +290,11 @@ export class BrowserSessionDO {
 
   // ─── 拡張 WS (hibernatable) ─────────────────────────────────────────────────
 
-  /** 1 session = 1 拡張接続。既存接続があれば閉じて最後勝ちにする。 */
+  /** 1 session = 1 拡張接続。既存の ext 接続があれば閉じて最後勝ちにする。 */
   private handleExt(req: Request): Response {
     if (!this.authorize(req)) return json({ error: "unauthorized" }, 401);
-    for (const old of this.ctx.getWebSockets()) {
+    // curated ext 脚だけを畳む (同 session に cdp passthrough 脚が居ても巻き込まない)。
+    for (const old of this.ctx.getWebSockets("ext")) {
       try {
         old.close(1000, "replaced");
       } catch {
@@ -292,8 +302,62 @@ export class BrowserSessionDO {
       }
     }
     const pair = new WebSocketPair();
-    this.ctx.acceptWebSocket(pair[1]); // hibernation 管理下に置く
+    this.ctx.acceptWebSocket(pair[1], ["ext"]); // hibernation 管理下 + tag で curated 脚を識別
     return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  // ─── raw CDP passthrough (chrome-devtools-mcp) ──────────────────────────────
+
+  /**
+   * chrome-devtools-mcp 用の生 CDP 中継。2 脚を hibernatable WS として hold し、
+   * `webSocketMessage` でフレームを相手脚へ無加工転送する:
+   *   - "cdp-bridge" … 手元 bridge (→ 実 Chrome :9222 の browser-level CDP)
+   *   - "cdp-client" … CCoW の chrome-devtools-mcp (puppeteer `--wsEndpoint`)
+   *
+   * client 脚は bridge 未接続だと 503 で fail-fast する (bridge 不在のまま upgrade を
+   * 返すと puppeteer の初手 `Target.setDiscoverTargets` が応答なしで hang するため)。
+   * curated な `/cmd` 相関 (in-memory pending Map) は使わない — 純粋なバイトパイプ。
+   */
+  private handleCdpLeg(req: Request, leg: "cdp-bridge" | "cdp-client"): Response {
+    if (!this.authorize(req)) return json({ error: "unauthorized" }, 401);
+    if (leg === "cdp-client" && this.ctx.getWebSockets("cdp-bridge").length === 0) {
+      return json({ error: "cdp_bridge_not_connected" }, 503);
+    }
+    // 脚ごとに最後勝ち (bridge / client を各 1 本に保つ)。相手脚は畳まない。
+    for (const old of this.ctx.getWebSockets(leg)) {
+      try {
+        old.close(1000, "replaced");
+      } catch {
+        /* already closed */
+      }
+    }
+    const pair = new WebSocketPair();
+    this.ctx.acceptWebSocket(pair[1], [leg]);
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  /** cdp passthrough 脚のフレームを相手脚へ無加工転送する。 */
+  private forwardCdp(fromTag: "cdp-bridge" | "cdp-client", message: string | ArrayBuffer): void {
+    const peerTag = fromTag === "cdp-client" ? "cdp-bridge" : "cdp-client";
+    const peer = this.ctx.getWebSockets(peerTag)[0];
+    if (!peer) return; // 相手不在: close ハンドラが teardown する
+    try {
+      peer.send(message);
+    } catch {
+      /* 相手が閉じかけ等。close ハンドラに任せる */
+    }
+  }
+
+  /** cdp passthrough 脚が閉じたら相手脚も畳んで、もう片側 (mcp / bridge) に切断を伝える。 */
+  private teardownCdpPeer(fromTag: "cdp-bridge" | "cdp-client"): void {
+    const peerTag = fromTag === "cdp-client" ? "cdp-bridge" : "cdp-client";
+    for (const peer of this.ctx.getWebSockets(peerTag)) {
+      try {
+        peer.close(1001, "peer_closed");
+      } catch {
+        /* already closed */
+      }
+    }
   }
 
   // ─── MCP → CDP コマンド投入 (/cmd) ──────────────────────────────────────────
@@ -516,7 +580,12 @@ export class BrowserSessionDO {
 
   // ─── WS hibernation lifecycle ───────────────────────────────────────────────
 
-  async webSocketMessage(_ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    // cdp passthrough 脚は相手へ無加工転送 (curated 相関を通さない)。
+    const tags = this.ctx.getTags(ws);
+    if (tags.includes("cdp-client")) return this.forwardCdp("cdp-client", message);
+    if (tags.includes("cdp-bridge")) return this.forwardCdp("cdp-bridge", message);
+
     let parsed: { id?: unknown; result?: unknown; error?: unknown };
     try {
       const raw = typeof message === "string" ? message : new TextDecoder().decode(message);
@@ -535,11 +604,17 @@ export class BrowserSessionDO {
     }
   }
 
-  async webSocketClose(): Promise<void> {
+  async webSocketClose(ws: WebSocket): Promise<void> {
+    const tags = this.ctx.getTags(ws);
+    if (tags.includes("cdp-client")) return this.teardownCdpPeer("cdp-client");
+    if (tags.includes("cdp-bridge")) return this.teardownCdpPeer("cdp-bridge");
     this.rejectAllPending("extension_disconnected");
   }
 
-  async webSocketError(): Promise<void> {
+  async webSocketError(ws: WebSocket): Promise<void> {
+    const tags = this.ctx.getTags(ws);
+    if (tags.includes("cdp-client")) return this.teardownCdpPeer("cdp-client");
+    if (tags.includes("cdp-bridge")) return this.teardownCdpPeer("cdp-bridge");
     this.rejectAllPending("extension_ws_error");
   }
 

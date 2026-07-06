@@ -13,6 +13,9 @@
  *
  * /cmd は edge では公開しない (MCP tool だけが DO stub 経由で内部的に叩く)。
  */
+// 追加ルート (raw CDP passthrough、chrome-devtools-mcp 連携):
+//   GET /cdpbridge/{session}   … 手元 bridge の WS upgrade (→ 実 Chrome :9222)。token 必須
+//   GET /cdp/{session}/...     … chrome-devtools-mcp (--wsEndpoint) の生 CDP 中継。token 必須
 import { Env } from "./env";
 import { checkToken, TokenCheck, checkMcpJwt, McpJwtCheck } from "./lib/auth";
 
@@ -45,6 +48,32 @@ export default {
       const auth = await edgeAuth(req, env);
       if (auth instanceof Response) return auth;
       return routeToDo(env, ext[1], req, auth);
+    }
+
+    // /cdpbridge/{session} — 手元 bridge の WS upgrade (browser 脚 → 実 Chrome :9222)。
+    // capability = 生 CDP = ブラウザ全権なので /ext と同じ relay-token / pair code 認証。
+    const cdpBridge = path.match(/^\/cdpbridge\/([^/]+)\/?$/);
+    if (cdpBridge) {
+      if (req.headers.get("Upgrade") !== "websocket") {
+        return text("expected websocket upgrade", 426);
+      }
+      const auth = await edgeAuth(req, env);
+      if (auth instanceof Response) return auth;
+      return routeToDo(env, cdpBridge[1], req, auth);
+    }
+
+    // /cdp/{session}/... — chrome-devtools-mcp (puppeteer --wsEndpoint) の client 脚。
+    // 例: /cdp/{session}/devtools/browser。session は最初のセグメント、以降のパスは
+    // puppeteer が付ける生 CDP パスなので DO へ素通し。token は wsEndpoint の ?token=
+    // か --wsHeaders の Authorization: Bearer (checkToken が両対応) で通す。
+    const cdpClient = path.match(/^\/cdp\/([^/]+)(?:\/.*)?$/);
+    if (cdpClient) {
+      if (req.headers.get("Upgrade") !== "websocket") {
+        return text("expected websocket upgrade", 426);
+      }
+      const auth = await edgeAuth(req, env);
+      if (auth instanceof Response) return auth;
+      return routeToDo(env, cdpClient[1], req, auth);
     }
 
     // /shot/{session}            PUT (token/pair) — 拡張が screenshot 投入
@@ -179,6 +208,8 @@ function landingPage(): Response {
       <tr><th>メソッド / パス</th><th>役割</th></tr>
       <tr><td><code>POST /mcp</code></td><td>MCP (browser_navigate / browser_screenshot)。MCP-JWT 認証</td></tr>
       <tr><td><code>GET /ext/{session}</code></td><td>拡張の WS upgrade。<code>?token=</code> 必須</td></tr>
+      <tr><td><code>GET /cdpbridge/{session}</code></td><td>手元 bridge の WS upgrade (→ 実 Chrome :9222)。token 必須</td></tr>
+      <tr><td><code>GET /cdp/{session}/…</code></td><td>chrome-devtools-mcp (<code>--wsEndpoint</code>) の生 CDP 中継。token 必須</td></tr>
       <tr><td><code>PUT /shot/{session}</code></td><td>拡張が screenshot を投入。token 必須</td></tr>
       <tr><td><code>GET /shot/{session}/{id}</code></td><td>screenshot 一時配信 (予測不能 id)</td></tr>
       <tr><td><code>POST /register/{session}</code></td><td>手元 agent が quick tunnel URL を登録。token 必須</td></tr>

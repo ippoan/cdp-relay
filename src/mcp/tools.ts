@@ -138,6 +138,84 @@ function packPairString(relay: string, session: string, code: string): string {
   return "cdp1." + b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/** relayOrigin(env) を wss:// (ws://) base に正規化する (cdp passthrough の wsEndpoint 用)。 */
+function relayWssBase(env: Env): string {
+  const o = relayOrigin(env);
+  if (o.startsWith("https://")) return "wss://" + o.slice("https://".length);
+  if (o.startsWith("http://")) return "ws://" + o.slice("http://".length);
+  return o;
+}
+
+export interface CdpEndpointResult {
+  /** ペアリング先 session 名 (省略時に採番されたもの)。bridge / mcp で同じ値を使う。 */
+  session: string;
+  /** bridge 脚 / client 脚の両方を通す短命 pairing code (= wsEndpoint / bridge に渡す token)。 */
+  pair_code: string;
+  /** pair_code の有効秒数。 */
+  expires_in_seconds: number;
+  /** cdp-relay の公開 origin。 */
+  relay_url: string;
+  /** chrome-devtools-mcp の `--wsEndpoint` にそのまま渡す値 (token を ?token= に埋め込み済み)。 */
+  ws_endpoint: string;
+  /** 手元で走らせる bridge 起動コマンド (Chrome を --remote-debugging-port=9222 で起動済み前提)。 */
+  bridge_command: string;
+  /** CCoW でそのまま叩ける chrome-devtools-mcp 起動コマンド。 */
+  chrome_devtools_mcp_command: string;
+}
+
+/**
+ * chrome-devtools-mcp を cdp-relay 経由で手元 Chrome に繋ぐための一式を発行する。
+ *
+ * 現行の curated tool (browser_navigate/eval/…) が chrome.debugger のタブ単位 CDP を
+ * 厳選 verb で叩くのに対し、こちらは **生 CDP passthrough**: 手元 bridge が実 Chrome の
+ * browser-level CDP (`--remote-debugging-port=9222`) を cdp-relay の `/cdpbridge/{session}`
+ * に outbound WSS で繋ぎ、CCoW の chrome-devtools-mcp は `--wsEndpoint`
+ * (`wss://…/cdp/{session}/devtools/browser?token=…`) で client 脚として合流する。DO は 2 脚を
+ * 無加工でパイプするだけ。これで chrome-devtools-mcp の全ツールが手元ブラウザに効く。
+ *
+ * pair_code は browser_pair と同じ短命 (既定 15 分)・session スコープの capability。
+ * bridge 脚・client 脚の両方の認証に使う。手順:
+ *   1. 手元 Chrome を `--remote-debugging-port=9222` で起動
+ *   2. 手元で bridge_command を実行
+ *   3. CCoW で chrome_devtools_mcp_command を実行
+ */
+export async function browserCdpEndpoint(
+  env: Env,
+  session?: string,
+  ttlSeconds?: number,
+): Promise<CdpEndpointResult> {
+  const s = typeof session === "string" && session.trim() !== "" ? session.trim() : randomSession();
+  const id = env.BROWSER_DO.idFromName(s);
+  const stub = env.BROWSER_DO.get(id);
+  const reqBody: Record<string, unknown> = {};
+  if (typeof ttlSeconds === "number") reqBody.ttl_seconds = ttlSeconds;
+  const res = await stub.fetch(DO_PAIR_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(reqBody),
+  });
+  const body = (await res.json()) as {
+    pair_code?: string;
+    expires_in_seconds?: number;
+    error?: string;
+  };
+  if (!res.ok || !body.pair_code) {
+    throw new CdpToolError(body.error ?? `pair_failed_${res.status}`);
+  }
+  const code = body.pair_code;
+  const relay = relayOrigin(env);
+  const wsEndpoint = `${relayWssBase(env)}/cdp/${encodeURIComponent(s)}/devtools/browser?token=${encodeURIComponent(code)}`;
+  return {
+    session: s,
+    pair_code: code,
+    expires_in_seconds: body.expires_in_seconds ?? 0,
+    relay_url: relay,
+    ws_endpoint: wsEndpoint,
+    bridge_command: `node bridge/cdp-bridge.mjs --session ${s} --token ${code}`,
+    chrome_devtools_mcp_command: `npx chrome-devtools-mcp@latest --wsEndpoint "${wsEndpoint}"`,
+  };
+}
+
 export interface ScreenshotResult {
   shot_url: string;
 }
