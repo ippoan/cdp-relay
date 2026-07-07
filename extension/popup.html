@@ -65,15 +65,15 @@
           <input id="cdpPort" placeholder="9222" />
         </div>
         <div class="row" id="cdpLaunchRow" style="display: none;">
-          <label for="cdpLaunch">推奨 Chrome 起動フラグ（実行ファイルの後ろに付ける）</label>
+          <label for="cdpLaunch">Chrome 起動コマンド（ショートカットのリンク先に貼る。chrome.exe のパスが違う場合は先頭を差し替え）</label>
           <textarea
             id="cdpLaunch"
             readonly
-            rows="2"
+            rows="3"
             style="width: 100%; box-sizing: border-box; font: 11px/1.4 ui-monospace, monospace;"
           ></textarea>
           <button id="copyCdpLaunch" style="width: 100%; margin-top: 4px;">
-            Chrome 起動フラグをコピー
+            Chrome 起動コマンドをコピー
           </button>
         </div>
         <div class="row" id="tabRow">
