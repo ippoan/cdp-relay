@@ -39,15 +39,30 @@ function toggleCdpFields() {
   if (cdp) refreshCdpLaunch();
 }
 
-/** ポート入力に追従して推奨 Chrome 起動フラグを組み立てる。 */
-function buildCdpLaunch() {
+/** ポート入力に追従して推奨 Chrome 起動フラグ (実行ファイルの後ろに付ける分) を組み立てる。 */
+function buildCdpFlags() {
   const raw = parseInt($("cdpPort").value, 10);
   const port = Number.isFinite(raw) && raw > 0 ? raw : 9222;
   // 拡張 SW の WS は Origin: chrome-extension://<id> を付けるので --remote-allow-origins
   // が無いと :port が upgrade を拒否する。**この拡張 id だけ**を許可する (chrome.runtime.id は
   // SW の Origin と同じ id に解決する)。`*` は全 origin 許可 = 任意の Web ページから
   // localhost の CDP を乗っ取られるため使わない (デバッグポート乗っ取り対策)。
-  return `--remote-debugging-port=${port} --remote-allow-origins=chrome-extension://${chrome.runtime.id}`;
+  // --user-data-dir は既存 Chrome が動いていても別インスタンスを起動できる専用プロファイル。
+  return (
+    `--remote-debugging-port=${port} ` +
+    `--remote-allow-origins=chrome-extension://${chrome.runtime.id} ` +
+    `--user-data-dir="%LOCALAPPDATA%\\cdp-relay-chrome"`
+  );
+}
+
+/**
+ * ショートカットのリンク先にそのまま貼れる完全な Chrome 起動コマンドを組み立てる。
+ * chrome.exe のパスは拡張からは分からないので Windows 既定 (Program Files) を置く
+ * (違う場合は先頭を差し替える旨をラベルで案内)。%LOCALAPPDATA% はショートカット起動時に
+ * Windows が展開する。
+ */
+function buildCdpLaunch() {
+  return `"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" ${buildCdpFlags()}`;
 }
 
 /** 推奨起動フラグを textarea に反映する (CDP mode 表示時のみ)。 */
@@ -301,14 +316,14 @@ $("cdpPort").addEventListener("input", () => {
   refreshCdpLaunch();
 });
 
-// 推奨 Chrome 起動フラグをコピー (gesture を保ったまま同期コピー)。
+// 推奨 Chrome 起動コマンドをコピー (gesture を保ったまま同期コピー)。
 $("copyCdpLaunch").addEventListener("click", () => {
   const text = buildCdpLaunch();
   $("cdpLaunch").value = text;
   const ok = copyToClipboard(text);
   setStatus(
     ok
-      ? "Chrome 起動フラグをコピーしました（実行ファイルの後ろに付けて起動）"
+      ? "Chrome 起動コマンドをコピーしました（ショートカットのリンク先に貼る）"
       : "コピー拒否。上の枠をクリック → Ctrl+C でコピーしてください",
     ok ? "ok" : "err",
   );
