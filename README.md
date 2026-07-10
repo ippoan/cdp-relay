@@ -47,10 +47,34 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
 | `GET /shot/{session}/{id}` | screenshot 一時配信 (予測不能 id ゆえ token 不要、TTL 既定 5 分) |
 | `POST /register/{session}` | 手元 agent が quick tunnel URL を登録。token 必須 (rendezvous, #12 M3) |
 | `GET /lookup/{session}` | CCoW proxy が session の tunnel URL を引く。token 必須 (rendezvous, #12 M3) |
+| `GET /cdpbridge/{session}` | 手元 bridge の WS upgrade (→ 実 Chrome :9222 の生 CDP)。token 必須 |
+| `GET /cdp/{session}/…` | chrome-devtools-mcp (`--wsEndpoint`) の生 CDP 中継 (client 脚)。token 必須 |
+| `GET /mcpbridge/{session}` | 手元 bridge (`--mcp`) の WS upgrade (spawn した chrome-devtools-mcp の stdio JSONL)。token 必須 (#81) |
+| `GET /mcppipe/{session}` | CCoW の MCP stdio シム (client 脚) の WS upgrade。token 必須 (#81) |
 | `GET /health` | ヘルスチェック |
 | `GET /` | 説明ページ |
 
 `/cmd` は edge では公開しない。MCP tool だけが DO stub 経由で内部的に叩く。
+
+## 3 つの操作形態と使い分け
+
+| | **curated** (既定) | **CDP passthrough** | **MCP passthrough** (#81) |
+|---|---|---|---|
+| 発行 tool | `browser_pair` | `browser_cdp_endpoint` | `browser_mcp_endpoint` |
+| 手元に必要なもの | 拡張のみ (通常起動の Chrome) | debug port Chrome + 拡張 or node bridge | debug port Chrome + **node bridge (`--mcp`) 必須** |
+| relay を流れるもの | 厳選 verb (navigate/eval/…) | 生 CDP フレーム | MCP JSON-RPC (stdio JSONL) |
+| chrome-devtools-mcp | — | CCoW 側で起動 (`--wsEndpoint`) | **手元側で bridge が spawn** |
+| 1 ツール呼び出しの海越え往復 | 1 | 4〜5 (warm ~1.1s) | **1 (~0.3s、約 4 倍速)** |
+| 操作対象 | 普段使い Chrome のタブ | 専用 profile の Chrome 全タブ | 専用 profile の Chrome 全タブ |
+
+- 「今すぐ画面を見たい / ログイン済み cookie 状態が要る」→ **curated** (Chrome 136+ は
+  デフォルト profile への debug port を無視するため、debug port 系 2 形態では普段使い
+  profile を操作できない)
+- 「chrome-devtools-mcp の全ツールが要る + 操作を連打する」→ **MCP passthrough**
+- 「生 CDP そのものが要る (プロトコル検証等) / 手元に node を置きたくない (拡張 SW が
+  bridge になる)」→ **CDP passthrough**
+
+レイテンシ実測と経緯は #80 / #81 を参照。
 
 ## データフロー (CDP 往復の id 相関)
 
@@ -79,6 +103,11 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
 - `browser_navigate(session, url)` — 手元 Chrome を url に遷移 (http(s) のみ)。`{ url }` を返す
 - `browser_screenshot(session)` — viewport を撮って `{ shot_url }` を返す
 - `browser_eval(session, expression)` — 現在ページで JS 式を評価し `{ value }` を返す。text 取得は `document.body.innerText` 等 (PNG と違い値が小さいので shot_url ではなく値を直接返す)
+- `browser_cdp_endpoint(session?, ttl_seconds?)` — 生 CDP passthrough の一式
+  (`ws_endpoint` / `bridge_command` / `chrome_devtools_mcp_command` / `pair_string(m:cdp)`) を発行
+- `browser_mcp_endpoint(session?, ttl_seconds?)` — MCP passthrough (#81) の一式
+  (`ws_endpoint` / `bridge_command(--mcp)` / `claude_mcp_add_command`) を発行。手元 bridge が
+  chrome-devtools-mcp を spawn し stdio を relay するので 1 ツール = 海越え 1 往復で速い
 
 > 設計判断 (なぜ stateless + 自前 DO で durable McpAgent でないか): tool セットは固定なので
 > `listChanged` 不要。durable の `McpAgent` は WS transport を内部で握るため「拡張用の別 WS

@@ -76,6 +76,30 @@ export default {
       return routeToDo(env, cdpClient[1], req, auth);
     }
 
+    // /mcpbridge/{session} — 手元 bridge の WS upgrade (--mcp: spawn した
+    // chrome-devtools-mcp の stdio JSONL を運ぶ、Refs #81)。capability は CDP passthrough
+    // と同等 (ブラウザ全権) なので同じ relay-token / pair code 認証。
+    const mcpBridge = path.match(/^\/mcpbridge\/([^/]+)\/?$/);
+    if (mcpBridge) {
+      if (req.headers.get("Upgrade") !== "websocket") {
+        return text("expected websocket upgrade", 426);
+      }
+      const auth = await edgeAuth(req, env);
+      if (auth instanceof Response) return auth;
+      return routeToDo(env, mcpBridge[1], req, auth);
+    }
+
+    // /mcppipe/{session} — CCoW の MCP stdio シム (client 脚) の WS upgrade (Refs #81)。
+    const mcpClient = path.match(/^\/mcppipe\/([^/]+)\/?$/);
+    if (mcpClient) {
+      if (req.headers.get("Upgrade") !== "websocket") {
+        return text("expected websocket upgrade", 426);
+      }
+      const auth = await edgeAuth(req, env);
+      if (auth instanceof Response) return auth;
+      return routeToDo(env, mcpClient[1], req, auth);
+    }
+
     // /shot/{session}            PUT (token/pair) — 拡張が screenshot 投入
     // /shot/{session}/{id}       GET (no token) — Claude が curl で取得
     const shot = path.match(/^\/shot\/([^/]+)(?:\/([^/]+))?\/?$/);
@@ -210,6 +234,8 @@ function landingPage(): Response {
       <tr><td><code>GET /ext/{session}</code></td><td>拡張の WS upgrade。<code>?token=</code> 必須</td></tr>
       <tr><td><code>GET /cdpbridge/{session}</code></td><td>手元 bridge の WS upgrade (→ 実 Chrome :9222)。token 必須</td></tr>
       <tr><td><code>GET /cdp/{session}/…</code></td><td>chrome-devtools-mcp (<code>--wsEndpoint</code>) の生 CDP 中継。token 必須</td></tr>
+      <tr><td><code>GET /mcpbridge/{session}</code></td><td>手元 bridge (<code>--mcp</code>) の WS upgrade (spawn した chrome-devtools-mcp の stdio)。token 必須</td></tr>
+      <tr><td><code>GET /mcppipe/{session}</code></td><td>CCoW の MCP stdio シムの WS upgrade (MCP passthrough)。token 必須</td></tr>
       <tr><td><code>PUT /shot/{session}</code></td><td>拡張が screenshot を投入。token 必須</td></tr>
       <tr><td><code>GET /shot/{session}/{id}</code></td><td>screenshot 一時配信 (予測不能 id)</td></tr>
       <tr><td><code>POST /register/{session}</code></td><td>手元 agent が quick tunnel URL を登録。token 必須</td></tr>
