@@ -286,14 +286,19 @@ fn run_once(cfg: &BridgeConfig, url: &str) -> Result<(), String> {
     })?;
     alog!("[mcp-bridge] remote (cdp-relay) open");
     // read をノンブロッキング寄りにして child stdout との多重化をシングルスレッドで回す。
+    // timeout はレイテンシに直結する (child stdout の応答は ws.read の block 中に届くため、
+    // 転送まで最悪 timeout 分待つ)。#81 実測で 50ms poll が往復 +25ms (平均) を足していた
+    // ので 5ms に短縮。CPU は ~200 wake/s で無視できる。
+    // 併せて Nagle を切る (TCP_NODELAY) — JSONL の小さいフレームが ACK 待ちで
+    // 遅延バッファされるのを防ぐ。
     match ws.get_mut() {
         MaybeTlsStream::Plain(s) => {
-            let _ = s.set_read_timeout(Some(Duration::from_millis(50)));
+            let _ = s.set_read_timeout(Some(Duration::from_millis(5)));
+            let _ = s.set_nodelay(true);
         }
         MaybeTlsStream::NativeTls(t) => {
-            let _ = t
-                .get_ref()
-                .set_read_timeout(Some(Duration::from_millis(50)));
+            let _ = t.get_ref().set_read_timeout(Some(Duration::from_millis(5)));
+            let _ = t.get_ref().set_nodelay(true);
         }
         _ => {}
     }
