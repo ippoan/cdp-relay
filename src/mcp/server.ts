@@ -119,8 +119,8 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
         {
           description:
             "MCP passthrough (高速版) の一式を発行する。chrome-devtools-mcp を **手元で** 動かし、" +
-            "MCP JSON-RPC (1 ツール呼び出し = 太平洋横断 1 往復 ≈ 0.3s) だけを relay する — " +
-            "browser_cdp_endpoint (生 CDP、1 ツール = 4〜5 往復 ≈ 1.1s) の約 4 倍速く、" +
+            "MCP JSON-RPC (1 ツール呼び出し = 太平洋横断 1 往復、実測 0.4〜0.6s) だけを relay する — " +
+            "browser_cdp_endpoint (生 CDP、1 ツール = 4〜5 往復 ≈ 1.1s) の 2〜2.5 倍速く、" +
             "chrome-devtools-mcp の全ツールが同じように効く。操作を連打するワークロードではこちらを推奨。" +
             "返り値: ws_endpoint / bridge_command / bootstrap_command / pair_string / claude_mcp_add_command。手順: " +
             "(1) 手元 Chrome を --remote-debugging-port=9222 --user-data-dir=<非デフォルト> で起動 " +

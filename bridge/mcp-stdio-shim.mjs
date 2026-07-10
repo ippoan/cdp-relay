@@ -7,7 +7,8 @@
  * `node bridge/cdp-bridge.mjs --mcp` が spawn した chrome-devtools-mcp。
  *
  * 生 CDP passthrough (`--wsEndpoint`) と違い、1 ツール呼び出しが太平洋横断 1 往復で
- * 済む (CDP の 4〜5 往復 → 1 往復、実測 ~1.1s → ~0.3s)。
+ * 済む (CDP の 4〜5 往復 → 1 往復、実測 ~1.1s → 0.4〜0.6s = 2〜2.5 倍。回線状況依存、
+ * #81 の実測経緯参照)。
  *
  * 依存ゼロ (Node 22+ の global WebSocket)。CCoW の egress は TCP/443 直結 + TLS MITM
  * (Anthropic Egress Gateway) だが、`NODE_EXTRA_CA_CERTS=/root/.ccr/ca-bundle.crt` が

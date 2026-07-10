@@ -64,7 +64,7 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
 | 手元に必要なもの | 拡張のみ (通常起動の Chrome) | debug port Chrome + 拡張 or node bridge | debug port Chrome + **node bridge (`--mcp`) 必須** |
 | relay を流れるもの | 厳選 verb (navigate/eval/…) | 生 CDP フレーム | MCP JSON-RPC (stdio JSONL) |
 | chrome-devtools-mcp | — | CCoW 側で起動 (`--wsEndpoint`) | **手元側で bridge が spawn** |
-| 1 ツール呼び出しの海越え往復 | 1 | 4〜5 (warm ~1.1s) | **1 (~0.3s、約 4 倍速)** |
+| 1 ツール呼び出しの海越え往復 | 1 | 4〜5 (warm ~1.1s) | **1 (実測 0.4〜0.6s、2〜2.5 倍)** |
 | 操作対象 | 普段使い Chrome のタブ | 専用 profile の Chrome 全タブ | 専用 profile の Chrome 全タブ |
 
 - 「今すぐ画面を見たい / ログイン済み cookie 状態が要る」→ **curated** (Chrome 136+ は

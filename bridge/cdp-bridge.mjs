@@ -32,7 +32,8 @@
  *   --mcp              MCP passthrough モード (Refs #81)。生 CDP の代わりに
  *                      chrome-devtools-mcp を手元で spawn し、その stdio (JSONL) を
  *                      relay の /mcpbridge/{session} へパイプする。CDP の 1 ツール
- *                      呼び出し = 4〜5 往復が 1 往復になり、CCoW からの操作が約 4 倍速い。
+ *                      呼び出し = 4〜5 往復が 1 往復になる (実測 ~1.1s → 0.4〜0.6s、
+ *                      2〜2.5 倍。回線状況依存。#81 の実測経緯参照)。
  *   --mcp-cmd <cmd>    --mcp 時の起動コマンド上書き (既定:
  *                      `npx -y chrome-devtools-mcp@latest --browserUrl http://<host>:<port>`)
  */
