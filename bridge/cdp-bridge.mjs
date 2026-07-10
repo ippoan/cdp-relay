@@ -29,7 +29,15 @@
  *   --relay <url>      cdp-relay の base URL (既定 https://cdp-relay.ippoan.org)
  *   --host <host>      実 Chrome の DevTools ホスト (既定 127.0.0.1)
  *   --port <port>      実 Chrome の DevTools ポート (既定 9222)
+ *   --mcp              MCP passthrough モード (Refs #81)。生 CDP の代わりに
+ *                      chrome-devtools-mcp を手元で spawn し、その stdio (JSONL) を
+ *                      relay の /mcpbridge/{session} へパイプする。CDP の 1 ツール
+ *                      呼び出し = 4〜5 往復が 1 往復になり、CCoW からの操作が約 4 倍速い。
+ *   --mcp-cmd <cmd>    --mcp 時の起動コマンド上書き (既定:
+ *                      `npx -y chrome-devtools-mcp@latest --browserUrl http://<host>:<port>`)
  */
+
+import { spawn } from "node:child_process";
 
 function parseArgs(argv) {
   const out = {};
@@ -51,6 +59,8 @@ const cfg = {
   relay: (args.relay ?? process.env.CDP_BRIDGE_RELAY ?? "https://cdp-relay.ippoan.org").replace(/\/+$/, ""),
   host: args.host ?? process.env.CDP_BRIDGE_HOST ?? "127.0.0.1",
   port: args.port ?? process.env.CDP_BRIDGE_PORT ?? "9222",
+  mcp: (args.mcp ?? process.env.CDP_BRIDGE_MCP ?? "") !== "" && args.mcp !== "false",
+  mcpCmd: args["mcp-cmd"] ?? process.env.CDP_BRIDGE_MCP_CMD ?? "",
 };
 
 if (!cfg.session || !cfg.token) {
@@ -126,17 +136,86 @@ function runOnce(browserWsUrl) {
   });
 }
 
+// ─── MCP passthrough モード (--mcp、Refs #81) ────────────────────────────────
+
+const mcpRelayWsUrl = `${relayWss(cfg.relay)}/mcpbridge/${encodeURIComponent(cfg.session)}?token=${encodeURIComponent(cfg.token)}`;
+
+/**
+ * 1 セッション分の MCP passthrough。chrome-devtools-mcp を spawn し、
+ * その stdio (newline-delimited JSON-RPC) と relay の /mcpbridge WS を 1 行 = 1 フレームで
+ * 双方向パイプする。client (CCoW の stdio シム) が切断すると DO が bridge 脚も畳むので、
+ * child を kill して resolve する (次のループで新しい child + 新しい WS = クリーンな
+ * MCP 状態で待ち受け直す。MCP の initialize は client 接続ごとに 1 回きりのため)。
+ */
+function runOnceMcp() {
+  return new Promise((resolve, reject) => {
+    const cmd = cfg.mcpCmd !== ""
+      ? cfg.mcpCmd
+      : `npx -y chrome-devtools-mcp@latest --browserUrl http://${cfg.host}:${cfg.port}`;
+    const [exe, ...exeArgs] = cmd.split(/\s+/);
+    // Windows の npx は .cmd シム経由なので shell: true で解決する。
+    const child = spawn(exe, exeArgs, { stdio: ["pipe", "pipe", "pipe"], shell: process.platform === "win32" });
+    log(`mcp child spawn: ${cmd} (pid ${child.pid ?? "?"})`);
+
+    const remote = new WebSocket(mcpRelayWsUrl);
+    let settled = false;
+    const done = (why, isErr) => {
+      if (settled) return;
+      settled = true;
+      log("mcp session end:", why);
+      try { child.kill(); } catch {}
+      try { remote.close(); } catch {}
+      if (isErr) reject(new Error(why));
+      else resolve();
+    };
+
+    // child stdout (JSONL) → 1 行 = 1 WS フレーム。相手が開くまでバッファ。
+    const toRemote = [];
+    let stdoutBuf = "";
+    child.stdout.on("data", (d) => {
+      stdoutBuf += d.toString("utf8");
+      let idx;
+      while ((idx = stdoutBuf.indexOf("\n")) >= 0) {
+        const line = stdoutBuf.slice(0, idx).replace(/\r$/, "");
+        stdoutBuf = stdoutBuf.slice(idx + 1);
+        if (line === "") continue;
+        if (remote.readyState === WebSocket.OPEN) remote.send(line);
+        else toRemote.push(line);
+      }
+    });
+    child.stderr.on("data", (d) => process.stderr.write(`[chrome-devtools-mcp] ${d}`));
+    child.on("exit", (code) => done(`mcp child exit (${code})`, code !== 0 && code !== null));
+    child.on("error", (e) => done(`mcp child spawn error: ${e.message}`, true));
+
+    remote.onopen = () => {
+      log("mcp remote (cdp-relay) open:", mcpRelayWsUrl.replace(/token=[^&]+/, "token=***"));
+      while (toRemote.length) remote.send(toRemote.shift());
+    };
+    // relay (CCoW シム) → child stdin。1 フレーム = 1 行。
+    remote.onmessage = (ev) => {
+      const data = typeof ev.data === "string" ? ev.data : Buffer.from(ev.data).toString("utf8");
+      child.stdin.write(data + "\n");
+    };
+    remote.onclose = (e) => done(`mcp remote closed (${e.code} ${e.reason || ""})`);
+    remote.onerror = () => done("mcp remote error");
+  });
+}
+
 async function main() {
-  log(`session=${cfg.session} relay=${cfg.relay} chrome=${cfg.host}:${cfg.port}`);
+  log(`session=${cfg.session} relay=${cfg.relay} chrome=${cfg.host}:${cfg.port} mode=${cfg.mcp ? "mcp" : "cdp"}`);
   let backoff = 1000;
-  // cdp-relay は client (chrome-devtools-mcp) が切断すると bridge 脚も畳む設計なので、
-  // 1 セッション終了ごとに実 Chrome の WS を張り直して次の client を待つ (= 毎回クリーンな
-  // CDP 状態で始まる)。実 Chrome / relay 到達不能はバックオフして再試行する。
+  // cdp-relay は client が切断すると bridge 脚も畳む設計なので、1 セッション終了ごとに
+  // 手元側 (実 Chrome の WS / chrome-devtools-mcp child) を張り直して次の client を待つ
+  // (= 毎回クリーンな状態で始まる)。到達不能・spawn 失敗はバックオフして再試行する。
   for (;;) {
     try {
-      const browserWs = await discoverBrowserWs();
+      if (cfg.mcp) {
+        await runOnceMcp();
+      } else {
+        const browserWs = await discoverBrowserWs();
+        await runOnce(browserWs);
+      }
       backoff = 1000;
-      await runOnce(browserWs);
     } catch (e) {
       log("retry:", e.message || String(e));
       await new Promise((r) => setTimeout(r, backoff));

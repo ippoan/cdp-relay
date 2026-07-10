@@ -25,6 +25,7 @@ import {
   browserCdpEndpoint,
   browserCookies,
   browserEval,
+  browserMcpEndpoint,
   browserNavigate,
   browserPair,
   browserScreenshot,
@@ -107,6 +108,42 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
         async ({ session, ttl_seconds }: { session?: string; ttl_seconds?: number }) => {
           try {
             return ok(await browserCdpEndpoint(env, session, ttl_seconds));
+          } catch (e) {
+            return fail(e);
+          }
+        },
+      );
+
+      server.registerTool(
+        "browser_mcp_endpoint",
+        {
+          description:
+            "MCP passthrough (高速版) の一式を発行する。chrome-devtools-mcp を **手元で** 動かし、" +
+            "MCP JSON-RPC (1 ツール呼び出し = 太平洋横断 1 往復 ≈ 0.3s) だけを relay する — " +
+            "browser_cdp_endpoint (生 CDP、1 ツール = 4〜5 往復 ≈ 1.1s) の約 4 倍速く、" +
+            "chrome-devtools-mcp の全ツールが同じように効く。操作を連打するワークロードではこちらを推奨。" +
+            "返り値: ws_endpoint / bridge_command / claude_mcp_add_command。手順: " +
+            "(1) 手元 Chrome を --remote-debugging-port=9222 --user-data-dir=<非デフォルト> で起動 " +
+            "(Chrome 136+ はデフォルト profile への debug port を無視する)。" +
+            "(2) 手元で bridge_command (`node bridge/cdp-bridge.mjs --mcp …`) を実行 — " +
+            "**node 必須** (拡張 SW はプロセスを spawn できないため拡張だけでは完結しない。拡張のみで済ませたい / " +
+            "生 CDP が要る時は browser_cdp_endpoint を使う)。" +
+            "(3) CCoW で claude_mcp_add_command を実行 (次 session から有効)。" +
+            "pair_code は短命 (既定 15 分)・session スコープ。",
+          inputSchema: {
+            session: z
+              .string()
+              .optional()
+              .describe("ペアリング先 session 名。省略時はランダム採番 (pair-xxxxxxxx)"),
+            ttl_seconds: z
+              .number()
+              .optional()
+              .describe("pair_code の有効秒数 (既定 900、最大 86400)"),
+          },
+        },
+        async ({ session, ttl_seconds }: { session?: string; ttl_seconds?: number }) => {
+          try {
+            return ok(await browserMcpEndpoint(env, session, ttl_seconds));
           } catch (e) {
             return fail(e);
           }

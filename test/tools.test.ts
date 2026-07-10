@@ -4,6 +4,7 @@ import {
   browserCdpEndpoint,
   browserCookies,
   browserEval,
+  browserMcpEndpoint,
   browserNavigate,
   browserScreenshot,
   browserStash,
@@ -303,5 +304,29 @@ describe("browser_cdp_endpoint (chrome-devtools-mcp passthrough)", () => {
   it("session 省略時は pair-xxxxxxxx を採番する", async () => {
     const r = await browserCdpEndpoint(E);
     expect(r.session).toMatch(/^pair-[0-9a-f]{8}$/);
+  });
+});
+
+describe("browser_mcp_endpoint (MCP passthrough、Refs #81)", () => {
+  it("mcppipe の ws_endpoint / --mcp bridge / claude mcp add コマンドを返す", async () => {
+    const session = "mcpep-" + crypto.randomUUID();
+    const r = await browserMcpEndpoint(E, session, 600);
+    expect(r.session).toBe(session);
+    expect(r.pair_code).toMatch(/^[0-9a-f]{64}$/);
+    expect(r.expires_in_seconds).toBe(600);
+    expect(r.ws_endpoint).toBe(`wss://cdp-relay.test/mcppipe/${session}?token=${r.pair_code}`);
+    expect(r.bridge_command).toContain(`--mcp --session ${session} --token ${r.pair_code}`);
+    expect(r.claude_mcp_add_command).toContain(`mcp-stdio-shim.mjs --url "${r.ws_endpoint}"`);
+  });
+
+  it("session 省略時は pair-xxxxxxxx を採番し、pair_code で /mcpbridge に接続できる", async () => {
+    const r = await browserMcpEndpoint(E);
+    expect(r.session).toMatch(/^pair-[0-9a-f]{8}$/);
+    const res = await SELF.fetch(`${BASE}/mcpbridge/${r.session}?token=${r.pair_code}`, {
+      headers: { Upgrade: "websocket" },
+    });
+    expect(res.status).toBe(101);
+    res.webSocket!.accept();
+    res.webSocket!.close();
   });
 });

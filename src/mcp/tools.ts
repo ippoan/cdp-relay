@@ -99,6 +99,27 @@ export async function browserPair(
   session?: string,
   ttlSeconds?: number,
 ): Promise<PairResult> {
+  const { session: s, code, expiresInSeconds } = await mintPairCode(env, session, ttlSeconds);
+  const relay = relayOrigin(env);
+  return {
+    session: s,
+    pair_code: code,
+    expires_in_seconds: expiresInSeconds,
+    relay_url: relay,
+    pair_string: packPairString(relay, s, code),
+  };
+}
+
+/**
+ * session の DO に短命 pairing code を mint させる共通処理
+ * (browser_pair / browser_cdp_endpoint / browser_mcp_endpoint が共有)。
+ * session 省略時は `pair-xxxxxxxx` を採番する。
+ */
+async function mintPairCode(
+  env: Env,
+  session?: string,
+  ttlSeconds?: number,
+): Promise<{ session: string; code: string; expiresInSeconds: number }> {
   const s = typeof session === "string" && session.trim() !== "" ? session.trim() : randomSession();
   const id = env.BROWSER_DO.idFromName(s);
   const stub = env.BROWSER_DO.get(id);
@@ -117,14 +138,7 @@ export async function browserPair(
   if (!res.ok || !body.pair_code) {
     throw new CdpToolError(body.error ?? `pair_failed_${res.status}`);
   }
-  const relay = relayOrigin(env);
-  return {
-    session: s,
-    pair_code: body.pair_code,
-    expires_in_seconds: body.expires_in_seconds ?? 0,
-    relay_url: relay,
-    pair_string: packPairString(relay, s, body.pair_code),
-  };
+  return { session: s, code: body.pair_code, expiresInSeconds: body.expires_in_seconds ?? 0 };
 }
 
 /**
@@ -198,36 +212,68 @@ export async function browserCdpEndpoint(
   session?: string,
   ttlSeconds?: number,
 ): Promise<CdpEndpointResult> {
-  const s = typeof session === "string" && session.trim() !== "" ? session.trim() : randomSession();
-  const id = env.BROWSER_DO.idFromName(s);
-  const stub = env.BROWSER_DO.get(id);
-  const reqBody: Record<string, unknown> = {};
-  if (typeof ttlSeconds === "number") reqBody.ttl_seconds = ttlSeconds;
-  const res = await stub.fetch(DO_PAIR_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(reqBody),
-  });
-  const body = (await res.json()) as {
-    pair_code?: string;
-    expires_in_seconds?: number;
-    error?: string;
-  };
-  if (!res.ok || !body.pair_code) {
-    throw new CdpToolError(body.error ?? `pair_failed_${res.status}`);
-  }
-  const code = body.pair_code;
+  const { session: s, code, expiresInSeconds } = await mintPairCode(env, session, ttlSeconds);
   const relay = relayOrigin(env);
   const wsEndpoint = `${relayWssBase(env)}/cdp/${encodeURIComponent(s)}/devtools/browser?token=${encodeURIComponent(code)}`;
   return {
     session: s,
     pair_code: code,
-    expires_in_seconds: body.expires_in_seconds ?? 0,
+    expires_in_seconds: expiresInSeconds,
     relay_url: relay,
     ws_endpoint: wsEndpoint,
     bridge_command: `node bridge/cdp-bridge.mjs --session ${s} --token ${code}`,
     chrome_devtools_mcp_command: `npx chrome-devtools-mcp@latest --wsEndpoint "${wsEndpoint}"`,
     pair_string: packPairString(relay, s, code, "cdp"),
+  };
+}
+
+export interface McpEndpointResult {
+  /** ペアリング先 session 名 (省略時に採番されたもの)。bridge / シムで同じ値を使う。 */
+  session: string;
+  /** bridge 脚 / client 脚の両方を通す短命 pairing code。 */
+  pair_code: string;
+  /** pair_code の有効秒数。 */
+  expires_in_seconds: number;
+  /** cdp-relay の公開 origin。 */
+  relay_url: string;
+  /** CCoW 側シム (`mcp-stdio-shim.mjs --url`) に渡す client 脚 WS URL (token 埋め込み済み)。 */
+  ws_endpoint: string;
+  /** 手元で走らせる bridge 起動コマンド (Chrome を --remote-debugging-port=9222 + 非デフォルト --user-data-dir で起動済み前提)。 */
+  bridge_command: string;
+  /** CCoW でそのまま叩ける MCP server 登録コマンド (次 session から有効)。 */
+  claude_mcp_add_command: string;
+}
+
+/**
+ * MCP passthrough (Refs #81) の一式を発行する。生 CDP passthrough (`browser_cdp_endpoint`)
+ * が 1 ツール呼び出し = CDP 4〜5 往復 (太平洋横断 ~236ms/往復 → warm ~1.1s) なのに対し、
+ * こちらは chrome-devtools-mcp を **手元で** spawn し MCP JSON-RPC (1 ツール = 1 往復) だけを
+ * relay するので ~0.3s/call (約 4 倍)。
+ *
+ * 手順:
+ *   1. 手元 Chrome を `--remote-debugging-port=9222 --user-data-dir=<非デフォルト>` で起動
+ *      (Chrome 136+ はデフォルト profile への debug port を無視する)
+ *   2. 手元で bridge_command (`node bridge/cdp-bridge.mjs --mcp …`) を実行
+ *      (node 必須 — 拡張 SW はプロセスを spawn できないため拡張だけでは完結しない)
+ *   3. CCoW で claude_mcp_add_command を実行 (次 session から chrome-devtools-mcp の
+ *      全ツールが手元ブラウザに効く)
+ */
+export async function browserMcpEndpoint(
+  env: Env,
+  session?: string,
+  ttlSeconds?: number,
+): Promise<McpEndpointResult> {
+  const { session: s, code, expiresInSeconds } = await mintPairCode(env, session, ttlSeconds);
+  const relay = relayOrigin(env);
+  const wsEndpoint = `${relayWssBase(env)}/mcppipe/${encodeURIComponent(s)}?token=${encodeURIComponent(code)}`;
+  return {
+    session: s,
+    pair_code: code,
+    expires_in_seconds: expiresInSeconds,
+    relay_url: relay,
+    ws_endpoint: wsEndpoint,
+    bridge_command: `node bridge/cdp-bridge.mjs --mcp --session ${s} --token ${code}`,
+    claude_mcp_add_command: `claude mcp add chrome-local -- node bridge/mcp-stdio-shim.mjs --url "${wsEndpoint}"`,
   };
 }
 
