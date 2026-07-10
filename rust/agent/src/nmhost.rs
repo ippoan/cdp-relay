@@ -76,7 +76,8 @@ pub fn write_message<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
     w.flush()
 }
 
-/// 受信メッセージを応答 JSON に変換する純ロジック。probe / spawn / kill を注入して test 可能に。
+/// 受信メッセージを応答 JSON に変換する純ロジック。probe / spawn / kill / mcp を注入して
+/// test 可能に。
 ///
 /// - `{cmd:"ping"}`    → `{ok:true, version, ext_port}`
 /// - `{cmd:"start"}`   → 既に probe() 成功なら `already_running`、未起動なら spawn() して
@@ -85,6 +86,10 @@ pub fn write_message<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
 ///   たびに最新インストール版バイナリで起動するための経路 (#54 後の旧 agent 居座り対策)。
 ///   kill 失敗は best-effort で握り潰し (落とすものが無いだけのことが多い)、spawn 失敗のみ
 ///   `{ok:false, error}`。
+/// - `{cmd:"mcp_bridge_start", relay, session, token, port?}` → パラメータ検証後
+///   mcp("start", …) へ委譲 (#83、popup の「MCP bridge 起動」ボタン)。検証 NG は
+///   `{ok:false, error}` (mcp は呼ばない)。
+/// - `{cmd:"mcp_bridge_stop"}` / `{cmd:"mcp_bridge_status"}` → mcp("stop"/"status", …)。
 /// - その他 → `{ok:false, error:"unknown cmd"}`
 pub fn handle_request(
     req: &Value,
@@ -92,6 +97,7 @@ pub fn handle_request(
     probe: &dyn Fn() -> bool,
     spawn: &mut dyn FnMut() -> Result<String, String>,
     kill: &mut dyn FnMut() -> Result<String, String>,
+    mcp: &mut dyn FnMut(&str, &Value) -> Value,
 ) -> Value {
     let version = env!("CARGO_PKG_VERSION");
     match req.get("cmd").and_then(Value::as_str).unwrap_or("") {
@@ -122,8 +128,77 @@ pub fn handle_request(
                 Err(e) => json!({ "ok": false, "error": e }),
             }
         }
+        "mcp_bridge_start" => match validate_mcp_bridge_params(req) {
+            Ok(params) => mcp("start", &params),
+            Err(e) => json!({ "ok": false, "error": e }),
+        },
+        "mcp_bridge_stop" => mcp("stop", req),
+        "mcp_bridge_status" => mcp("status", req),
         other => json!({ "ok": false, "error": format!("unknown cmd: {other}") }),
     }
+}
+
+/// `mcp_bridge_start` のパラメータ検証 (純関数)。spawn の argv になる値なので、popup 由来の
+/// 値をそのまま流さず形式で縛る (コマンドライン injection は Command の argv 渡しで元々
+/// 起きないが、relay の宛先すり替えで token を第三者に送らせない目的が主)。
+///
+/// - relay: `https://` origin のみ (path/クエリ/空白不可)。dev 用に `http://127.0.0.1[:port]` /
+///   `http://localhost[:port]` も許可
+/// - session: 1〜128 字の `[A-Za-z0-9._-]`
+/// - token: 8〜256 字の `[A-Za-z0-9._~-]`
+/// - port: 1〜65535 (省略時 9222)
+pub fn validate_mcp_bridge_params(req: &Value) -> Result<Value, String> {
+    let get = |k: &str| {
+        req.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let relay = get("relay");
+    let session = get("session");
+    let token = get("token");
+    let port = req.get("port").and_then(Value::as_u64).unwrap_or(9222);
+
+    let relay_ok = {
+        let is_https_origin = relay.strip_prefix("https://").is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
+        });
+        let is_local = relay.strip_prefix("http://").is_some_and(|rest| {
+            let host = rest.split(':').next().unwrap_or("");
+            (host == "127.0.0.1" || host == "localhost")
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
+        });
+        is_https_origin || is_local
+    };
+    if !relay_ok {
+        return Err(format!("invalid relay: {relay}"));
+    }
+    if session.is_empty()
+        || session.len() > 128
+        || !session
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err("invalid session".into());
+    }
+    if token.len() < 8
+        || token.len() > 256
+        || !token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '~' | '-'))
+    {
+        return Err("invalid token".into());
+    }
+    if port == 0 || port > 65535 {
+        return Err("invalid port".into());
+    }
+    Ok(json!({ "relay": relay, "session": session, "token": token, "port": port }))
 }
 
 /// ext server (= agent) が起動済みか TCP connect で probe する。
@@ -150,6 +225,7 @@ pub fn run_native_host() {
                     &|| probe_agent(port),
                     &mut spawn_detached_agent,
                     &mut kill_other_agents,
+                    &mut crate::mcpbridge::nm_op,
                 );
                 if let Err(e) = write_message(&mut w, &resp) {
                     eprintln!("[cdp-agent] native-host write 失敗: {e}");
@@ -341,6 +417,11 @@ mod tests {
         || panic!("kill は呼ばれないはず")
     }
 
+    /// mcp は呼ばれない想定のテスト用 no-op (呼ばれたら panic)。
+    fn no_mcp() -> impl FnMut(&str, &Value) -> Value {
+        |_, _| panic!("mcp は呼ばれないはず")
+    }
+
     #[test]
     fn start_when_not_running_spawns() {
         let mut spawned = false;
@@ -354,6 +435,7 @@ mod tests {
                 Ok("spawned x".to_string())
             },
             &mut no_kill(),
+            &mut no_mcp(),
         );
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["started"], true);
@@ -370,6 +452,7 @@ mod tests {
             &|| true, // 既に起動
             &mut || panic!("spawn は呼ばれないはず"),
             &mut no_kill(),
+            &mut no_mcp(),
         );
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["already_running"], true);
@@ -384,6 +467,7 @@ mod tests {
             &|| false,
             &mut || Err("boom".to_string()),
             &mut no_kill(),
+            &mut no_mcp(),
         );
         assert_eq!(resp["ok"], false);
         assert_eq!(resp["error"], "boom");
@@ -405,6 +489,7 @@ mod tests {
                 killed = true;
                 Ok("taskkill rc=Some(0)".to_string())
             },
+            &mut no_mcp(),
         );
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["restarted"], true);
@@ -420,6 +505,7 @@ mod tests {
             &|| false,
             &mut || Ok("spawned".to_string()),
             &mut || Err("taskkill missing".to_string()),
+            &mut no_mcp(),
         );
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["restarted"], true);
@@ -434,6 +520,7 @@ mod tests {
             &|| false,
             &mut || Err("spawn boom".to_string()),
             &mut || Ok("killed".to_string()),
+            &mut no_mcp(),
         );
         assert_eq!(resp["ok"], false);
         assert_eq!(resp["error"], "spawn boom");
@@ -447,6 +534,7 @@ mod tests {
             &|| false,
             &mut || panic!("ping は spawn しない"),
             &mut no_kill(),
+            &mut no_mcp(),
         );
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["ext_port"], 19222);
@@ -461,9 +549,123 @@ mod tests {
             &|| false,
             &mut || panic!("unknown は spawn しない"),
             &mut no_kill(),
+            &mut no_mcp(),
         );
         assert_eq!(resp["ok"], false);
         assert!(resp["error"].as_str().unwrap().contains("unknown cmd"));
+    }
+
+    const OK_TOKEN: &str = "0123456789abcdef";
+
+    #[test]
+    fn mcp_bridge_start_validates_then_delegates() {
+        let mut got: Option<(String, Value)> = None;
+        let resp = handle_request(
+            &json!({ "cmd": "mcp_bridge_start", "relay": "https://cdp-relay.ippoan.org",
+                     "session": "s-1", "token": OK_TOKEN, "port": 9223 }),
+            19222,
+            &|| false,
+            &mut || panic!("spawn (agent) は呼ばれない"),
+            &mut no_kill(),
+            &mut |op, params| {
+                got = Some((op.to_string(), params.clone()));
+                json!({ "ok": true, "started": true })
+            },
+        );
+        assert_eq!(resp["ok"], true);
+        let (op, params) = got.expect("mcp が呼ばれる");
+        assert_eq!(op, "start");
+        assert_eq!(params["session"], "s-1");
+        assert_eq!(params["port"], 9223);
+    }
+
+    #[test]
+    fn mcp_bridge_start_rejects_bad_relay_without_delegating() {
+        for relay in [
+            "http://evil.example",    // 非 https の外部
+            "https://x.example/path", // path 付き
+            "https://x.example?a=b",  // クエリ付き
+            "ftp://x",                // scheme 違い
+            "",                       // 空
+        ] {
+            let resp = handle_request(
+                &json!({ "cmd": "mcp_bridge_start", "relay": relay,
+                         "session": "s", "token": OK_TOKEN }),
+                19222,
+                &|| false,
+                &mut || panic!("spawn は呼ばれない"),
+                &mut no_kill(),
+                &mut no_mcp(),
+            );
+            assert_eq!(resp["ok"], false, "relay={relay} は拒否されるはず");
+        }
+    }
+
+    #[test]
+    fn mcp_bridge_start_allows_localhost_relay_for_dev() {
+        let resp = handle_request(
+            &json!({ "cmd": "mcp_bridge_start", "relay": "http://127.0.0.1:8787",
+                     "session": "s", "token": OK_TOKEN }),
+            19222,
+            &|| false,
+            &mut || panic!("spawn は呼ばれない"),
+            &mut no_kill(),
+            &mut |_, _| json!({ "ok": true }),
+        );
+        assert_eq!(resp["ok"], true);
+    }
+
+    #[test]
+    fn mcp_bridge_start_rejects_bad_session_and_token() {
+        for (session, token) in [
+            ("bad session", OK_TOKEN),  // 空白入り session
+            ("", OK_TOKEN),             // 空 session
+            ("s", "short"),             // 8 字未満 token
+            ("s", "tok en 0123456789"), // 空白入り token
+        ] {
+            let resp = handle_request(
+                &json!({ "cmd": "mcp_bridge_start", "relay": "https://cdp-relay.ippoan.org",
+                         "session": session, "token": token }),
+                19222,
+                &|| false,
+                &mut || panic!("spawn は呼ばれない"),
+                &mut no_kill(),
+                &mut no_mcp(),
+            );
+            assert_eq!(
+                resp["ok"], false,
+                "session={session} token={token} は拒否されるはず"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_bridge_start_defaults_port_9222() {
+        let params = validate_mcp_bridge_params(&json!({
+            "relay": "https://cdp-relay.ippoan.org", "session": "s", "token": OK_TOKEN
+        }))
+        .unwrap();
+        assert_eq!(params["port"], 9222);
+    }
+
+    #[test]
+    fn mcp_bridge_stop_and_status_delegate() {
+        for (cmd, op_expected) in [("mcp_bridge_stop", "stop"), ("mcp_bridge_status", "status")] {
+            let mut got = String::new();
+            let resp = handle_request(
+                &json!({ "cmd": cmd }),
+                19222,
+                &|| false,
+                &mut || panic!("spawn は呼ばれない"),
+                &mut no_kill(),
+                &mut |op, _| {
+                    got = op.to_string();
+                    json!({ "ok": true })
+                },
+            );
+            assert_eq!(resp["ok"], true);
+            assert_eq!(got, op_expected);
+        }
     }
 
     #[test]

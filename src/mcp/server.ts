@@ -122,12 +122,13 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
             "MCP JSON-RPC (1 ツール呼び出し = 太平洋横断 1 往復 ≈ 0.3s) だけを relay する — " +
             "browser_cdp_endpoint (生 CDP、1 ツール = 4〜5 往復 ≈ 1.1s) の約 4 倍速く、" +
             "chrome-devtools-mcp の全ツールが同じように効く。操作を連打するワークロードではこちらを推奨。" +
-            "返り値: ws_endpoint / bridge_command / claude_mcp_add_command。手順: " +
+            "返り値: ws_endpoint / bridge_command / bootstrap_command / pair_string / claude_mcp_add_command。手順: " +
             "(1) 手元 Chrome を --remote-debugging-port=9222 --user-data-dir=<非デフォルト> で起動 " +
             "(Chrome 136+ はデフォルト profile への debug port を無視する)。" +
-            "(2) 手元で bridge_command (`node bridge/cdp-bridge.mjs --mcp …`) を実行 — " +
-            "**node 必須** (拡張 SW はプロセスを spawn できないため拡張だけでは完結しない。拡張のみで済ませたい / " +
-            "生 CDP が要る時は browser_cdp_endpoint を使う)。" +
+            "(2) 手元で bridge を起動 — 優先順: **(a) cdp-agent (MSI) 導入済みなら pair_string を拡張 popup に" +
+            "貼って「MCP bridge 起動」ボタン** (nmhost 経由、#83)。(b) repo clone 無しなら bootstrap_command " +
+            "(raw curl + node)。(c) clone 済みなら bridge_command。いずれも chrome-devtools-mcp が npm パッケージの" +
+            "ため手元に npx (Node.js) は必要。" +
             "(3) CCoW で claude_mcp_add_command を実行 (次 session から有効)。" +
             "pair_code は短命 (既定 15 分)・session スコープ。",
           inputSchema: {

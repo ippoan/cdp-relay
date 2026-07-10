@@ -16,6 +16,7 @@
 mod logbuf;
 mod extbridge;
 mod mcp;
+mod mcpbridge;
 mod nmhost;
 mod register;
 mod server;
@@ -151,6 +152,42 @@ fn main() {
         return;
     }
 
+    // MCP passthrough bridge モード (#83)。chrome-devtools-mcp を spawn して stdio を
+    // cdp-relay /mcpbridge へパイプする。通常は nmhost の {cmd:"mcp_bridge_start"}
+    // (popup の「MCP bridge 起動」ボタン) が detached でこのモードを起動する。
+    if args.iter().any(|a| a == "--mcp-bridge") {
+        let flag = |name: &str| -> String {
+            args.iter()
+                .position(|a| a == name)
+                .and_then(|i| args.get(i + 1))
+                .cloned()
+                .unwrap_or_default()
+        };
+        let cfg = mcpbridge::BridgeConfig {
+            relay: {
+                let r = flag("--relay");
+                if r.is_empty() {
+                    "https://cdp-relay.ippoan.org".into()
+                } else {
+                    r
+                }
+            },
+            session: flag("--session"),
+            // token は argv 露出を避けて env 優先 (nmhost 経由は env のみで渡る)。
+            token: std::env::var("CDP_AGENT_MCP_TOKEN").unwrap_or_else(|_| flag("--token")),
+            port: flag("--port").parse().unwrap_or(9222),
+            mcp_cmd: flag("--mcp-cmd"),
+        };
+        if cfg.session.is_empty() || cfg.token.is_empty() {
+            eprintln!(
+                "usage: cdp-agent --mcp-bridge --session <s> [--relay <url>] [--port 9222] \
+                 [--mcp-cmd <cmd>]  (token は CDP_AGENT_MCP_TOKEN env か --token)"
+            );
+            std::process::exit(2);
+        }
+        mcpbridge::run(&cfg);
+    }
+
     // 手動で native-host を登録する。Chrome/Edge の HKCU registry + manifest を書く。
     if args.iter().any(|a| a == "--install-native-host") {
         match nmhost::install_native_host() {
@@ -179,10 +216,12 @@ fn main() {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
             "cdp-agent — cf quick tunnel + /mcp MCP server + 拡張ブリッジ (cdp-relay#12)\n\n\
-             usage: cdp-agent [--install-native-host | --native-host]\n  \
+             usage: cdp-agent [--install-native-host | --native-host | --mcp-bridge]\n  \
              --install-native-host  Chrome/Edge の Native Messaging host を登録して終了 (#33)\n  \
              --print-native-host-manifest  native-host manifest JSON を表示して終了 (登録しない)\n  \
              --native-host          stdio launcher として動く (通常は Chrome が自動で付与)\n  \
+             --mcp-bridge           MCP passthrough bridge (#83): chrome-devtools-mcp を spawn し\n                         \
+             stdio を relay /mcpbridge へパイプ (--session/--relay/--port、token は CDP_AGENT_MCP_TOKEN)\n  \
              CDP_AGENT_ECHO_ONLY=1   HTTP server だけ起動 (tunnel を張らない)\n  \
              CLOUDFLARED_BIN=<path>  cloudflared バイナリの path を上書き\n  \
              CDP_AGENT_EXT_PORT=<n>  ext server の port (default 19222、拡張の接続先)\n  \

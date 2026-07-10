@@ -317,6 +317,15 @@ describe("browser_mcp_endpoint (MCP passthrough、Refs #81)", () => {
     expect(r.ws_endpoint).toBe(`wss://cdp-relay.test/mcppipe/${session}?token=${r.pair_code}`);
     expect(r.bridge_command).toContain(`--mcp --session ${session} --token ${r.pair_code}`);
     expect(r.claude_mcp_add_command).toContain(`mcp-stdio-shim.mjs --url "${r.ws_endpoint}"`);
+    // clone 不要 bootstrap (#83): raw 1 ファイル取得 + node 起動の 1 行コマンド。
+    expect(r.bootstrap_command).toContain("raw.githubusercontent.com/ippoan/cdp-relay/main/bridge/cdp-bridge.mjs");
+    expect(r.bootstrap_command).toContain(`node cdp-bridge.mjs --mcp --session ${session} --token ${r.pair_code}`);
+    // pair_string は mode=mcp — popup が「MCP bridge 起動」ボタンを出す契機 (#83)。
+    expect(r.pair_string).toMatch(/^cdp1\./);
+    let b64 = r.pair_string.slice(5).replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const decoded = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))));
+    expect(decoded).toMatchObject({ s: session, t: r.pair_code, m: "mcp" });
   });
 
   it("session 省略時は pair-xxxxxxxx を採番し、pair_code で /mcpbridge に接続できる", async () => {

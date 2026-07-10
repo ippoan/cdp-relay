@@ -70,6 +70,58 @@ function refreshCdpLaunch() {
   $("cdpLaunch").value = buildCdpLaunch();
 }
 
+// ─── MCP bridge (#83): pair_string (m:"mcp") → nmhost 経由で cdp-agent --mcp-bridge ───
+
+/** Native Messaging host 名 (background.js と同じ値。launcher = cdp-agent)。 */
+const NATIVE_HOST = "com.ippoan.cdp_agent";
+
+/**
+ * popup から nmhost に 1 メッセージ送る (background.js sendNative の popup 版)。
+ * host 未登録 (agent MSI 未導入) は lastError で reject する。
+ */
+function sendNativePopup(message) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("native messaging timeout"));
+    }, 8000);
+    try {
+      chrome.runtime.sendNativeMessage(NATIVE_HOST, message, (resp) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const err = chrome.runtime.lastError;
+        if (err) reject(new Error(err.message || "native messaging 失敗"));
+        else resolve(resp || {});
+      });
+    } catch (e) {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
+    }
+  });
+}
+
+/** MCP bridge の pairing パラメータを保存/取得する (pair_string 貼り付けで更新)。 */
+async function loadMcpBridgeParams() {
+  return (await chrome.storage.local.get("mcpBridge")).mcpBridge || null;
+}
+
+function showMcpBridgeRow(show) {
+  $("mcpBridgeRow").style.display = show ? "" : "none";
+  if (show) {
+    // Chrome は CDP passthrough と同じ debug port 起動が前提なので、ポート欄と
+    // 起動コマンドコピーも一緒に出す (cdpMode チェックとは独立)。
+    $("cdpPortRow").style.display = "";
+    $("cdpLaunchRow").style.display = "";
+    refreshCdpLaunch();
+  }
+}
+
 async function restore() {
   // 現在の拡張バージョンを表示 (manifest.json の version)。agent version は後で併記。
   extVer = chrome.runtime.getManifest().version;
@@ -110,6 +162,8 @@ async function restore() {
   toggleModeFields();
   // CDP passthrough mode に応じて対象タブ / ポート欄を切り替える。
   toggleCdpFields();
+  // MCP bridge のパラメータが保存済みなら起動/停止ボタンを出す (#83)。
+  if (await loadMcpBridgeParams()) showMcpBridgeRow(true);
 
   // 既に溜まっている debug ログを取り出してパネルに描画する。
   loadLogs();
@@ -373,6 +427,19 @@ function parsePairString(s) {
 $("combo").addEventListener("input", async () => {
   const p = parsePairString($("combo").value);
   if (!p) return;
+  // mode=mcp (browser_mcp_endpoint) は拡張自体を接続しない — パラメータを保存して
+  // 「MCP bridge 起動」ボタンを出すだけ (bridge は nmhost 経由の cdp-agent が担う、#83)。
+  if (p.mode === "mcp") {
+    await chrome.storage.local.set({
+      mcpBridge: { relay: p.relay, session: p.session, token: p.token },
+    });
+    $("combo").value = "";
+    showMcpBridgeRow(true);
+    setStatus(
+      "接続文字列 (MCP bridge) を読み込みました。Chrome を debug port 付きで起動してから「MCP bridge 起動」を押してください。",
+    );
+    return;
+  }
   $("relayUrl").value = p.relay;
   $("session").value = p.session;
   $("token").value = p.token;
@@ -387,6 +454,51 @@ $("combo").addEventListener("input", async () => {
       : "接続文字列を読み込みました。接続中…",
   );
   await doConnect();
+});
+
+// MCP bridge 起動/停止 (#83)。nmhost (cdp-agent) に mcp_bridge_start/stop を送る。
+$("mcpBridgeStart").addEventListener("click", async () => {
+  const p = await loadMcpBridgeParams();
+  if (!p) {
+    setStatus("MCP bridge のパラメータ未設定。browser_mcp_endpoint の pair_string を貼ってください。", "err");
+    return;
+  }
+  const raw = parseInt($("cdpPort").value, 10);
+  const port = Number.isFinite(raw) && raw > 0 ? raw : 9222;
+  setStatus("MCP bridge を起動中…");
+  try {
+    const resp = await sendNativePopup({
+      cmd: "mcp_bridge_start",
+      relay: p.relay,
+      session: p.session,
+      token: p.token,
+      port,
+    });
+    if (resp && resp.ok) {
+      setStatus(`MCP bridge 起動 (pid ${resp.pid ?? "?"})。CCoW 側の接続待ち`, "ok");
+    } else {
+      const err = (resp && resp.error) || "unknown";
+      setStatus(
+        `MCP bridge 起動失敗: ${err}` +
+          (String(err).includes("unknown cmd") ? "（agent が旧版。「更新」で agent を再起動して最新化）" : ""),
+        "err",
+      );
+    }
+  } catch (e) {
+    setStatus(
+      `MCP bridge 起動失敗: ${e.message}（cdp-agent 導入 + --install-native-host 済みか確認）`,
+      "err",
+    );
+  }
+});
+
+$("mcpBridgeStop").addEventListener("click", async () => {
+  try {
+    const resp = await sendNativePopup({ cmd: "mcp_bridge_stop" });
+    setStatus(resp && resp.ok ? `MCP bridge 停止 (${resp.detail ?? ""})` : "停止失敗", resp && resp.ok ? "ok" : "err");
+  } catch (e) {
+    setStatus(`停止失敗: ${e.message}`, "err");
+  }
 });
 
 $("disconnect").addEventListener("click", async () => {

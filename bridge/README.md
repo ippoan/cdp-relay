@@ -33,6 +33,15 @@ npx chrome-devtools-mcp@latest \
 なる。`--mcp` は chrome-devtools-mcp を**手元で spawn** し、その stdio (JSONL) を
 `/mcpbridge/{session}` へパイプする — 1 ツール = 1 往復 (~0.3s) で済む。
 
+手元での bridge 起動は 3 通り (どれも chrome-devtools-mcp が npm パッケージのため npx =
+Node.js は必要):
+
+- **(a) 拡張 popup の「MCP bridge 起動」ボタン (推奨、#83)** — cdp-agent (MSI) 導入済みなら、
+  `browser_mcp_endpoint` の `pair_string` (mode=mcp) を popup に貼るとボタンが出る。押すと
+  nmhost 経由で `cdp-agent --mcp-bridge` が detached 起動する (repo clone / node コマンド不要)
+- **(b) clone 不要 bootstrap** — `bootstrap_command` (raw curl + node) をそのまま実行
+- **(c) repo clone 済み** — 下の手順 2
+
 ```sh
 # 1. 手元 Chrome を DevTools ポート付きで起動 (Chrome 136+ は非デフォルト
 #    --user-data-dir が必須。デフォルト profile への debug port は無視される)
