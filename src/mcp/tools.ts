@@ -240,6 +240,14 @@ export interface McpEndpointResult {
   ws_endpoint: string;
   /** 手元で走らせる bridge 起動コマンド (Chrome を --remote-debugging-port=9222 + 非デフォルト --user-data-dir で起動済み前提)。 */
   bridge_command: string;
+  /** repo clone が無い手元マシン向け: raw 1 ファイルを curl して起動する bootstrap コマンド (#83)。 */
+  bootstrap_command: string;
+  /**
+   * 拡張 popup の「接続文字列（1コピペ）」欄に貼る 1 文字列 (`cdp1.…`、mode=mcp)。
+   * cdp-agent (MSI) 導入済みなら、貼ると popup に「MCP bridge 起動」ボタンが出て
+   * nmhost 経由で bridge が起動する (node clone 不要。npx は必要)。
+   */
+  pair_string: string;
   /** CCoW でそのまま叩ける MCP server 登録コマンド (次 session から有効)。 */
   claude_mcp_add_command: string;
 }
@@ -273,6 +281,10 @@ export async function browserMcpEndpoint(
     relay_url: relay,
     ws_endpoint: wsEndpoint,
     bridge_command: `node bridge/cdp-bridge.mjs --mcp --session ${s} --token ${code}`,
+    bootstrap_command:
+      `curl -O https://raw.githubusercontent.com/ippoan/cdp-relay/main/bridge/cdp-bridge.mjs && ` +
+      `node cdp-bridge.mjs --mcp --session ${s} --token ${code}`,
+    pair_string: packPairString(relay, s, code, "mcp"),
     claude_mcp_add_command: `claude mcp add chrome-local -- node bridge/mcp-stdio-shim.mjs --url "${wsEndpoint}"`,
   };
 }

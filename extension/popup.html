@@ -76,6 +76,15 @@
             Chrome 起動コマンドをコピー
           </button>
         </div>
+        <!-- MCP passthrough (#83): pair_string の m:"mcp" 検出時に表示。拡張は接続せず、
+             nmhost 経由で cdp-agent --mcp-bridge を起動/停止する (本当の「起動ボタン」)。 -->
+        <div class="row" id="mcpBridgeRow" style="display: none;">
+          <label style="font-weight: 600;">MCP bridge (chrome-devtools-mcp を手元 agent が起動)</label>
+          <div class="btns" style="margin-top: 4px;">
+            <button id="mcpBridgeStart">MCP bridge 起動</button>
+            <button id="mcpBridgeStop">停止</button>
+          </div>
+        </div>
         <div class="row" id="tabRow">
           <label for="tab">対象タブ</label>
           <select id="tab"></select>
