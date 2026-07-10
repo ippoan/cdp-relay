@@ -256,7 +256,7 @@ export interface McpEndpointResult {
  * MCP passthrough (Refs #81) の一式を発行する。生 CDP passthrough (`browser_cdp_endpoint`)
  * が 1 ツール呼び出し = CDP 4〜5 往復 (太平洋横断 ~236ms/往復 → warm ~1.1s) なのに対し、
  * こちらは chrome-devtools-mcp を **手元で** spawn し MCP JSON-RPC (1 ツール = 1 往復) だけを
- * relay するので ~0.3s/call (約 4 倍)。
+ * relay する。実測 (#81) は 0.4〜0.6s/call (回線状況依存) = 2〜2.5 倍。
  *
  * 手順:
  *   1. 手元 Chrome を `--remote-debugging-port=9222 --user-data-dir=<非デフォルト>` で起動

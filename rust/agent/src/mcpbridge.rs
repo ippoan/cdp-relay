@@ -3,7 +3,14 @@
 //! `bridge/cdp-bridge.mjs --mcp` の Rust 版。chrome-devtools-mcp を手元で spawn し、
 //! その stdio (newline-delimited JSON-RPC) を cdp-relay の `/mcpbridge/{session}` WSS に
 //! 1 行 = 1 フレームでパイプする。生 CDP passthrough (1 ツール = 4〜5 往復 ≈ 1.1s) と
-//! 違い 1 ツール = 海越え 1 往復 (≈ 0.3s) で済む (#80/#81 実測)。
+//! 違い 1 ツール = 海越え 1 往復で済む。
+//!
+//! 実測の経緯 (#81、2026-07-10 Windows 実機 × CCoW 米東海岸): 1 ツール呼び出し
+//! **0.4〜0.6s (回線状況依存)、生 CDP passthrough (~1.1s) 比 2〜2.5 倍**。接続確立は
+//! 8s (npx 起動込み) → 0.3〜0.4s。当初目標の 4 倍 (理論値 ~0.3s) に届かない差分
+//! ~150〜230ms は海越え RTT の時間帯変動 (±150ms、JST 夜間の家庭回線混雑) に埋もれて
+//! 分解できず打ち切り。**これ以上の短縮は海越え往復自体を無くす = エージェントを手元で
+//! 動かす (cc-webreview-ext 系) の領分** — この bridge のチューニングでは縮まらない。
 //!
 //! 拡張 popup の「MCP bridge 起動」ボタン → nmhost `{cmd:"mcp_bridge_start"}` →
 //! `cdp-agent --mcp-bridge …` の detached spawn、という導線で使う (node clone 不要。
@@ -287,10 +294,10 @@ fn run_once(cfg: &BridgeConfig, url: &str) -> Result<(), String> {
     alog!("[mcp-bridge] remote (cdp-relay) open");
     // read をノンブロッキング寄りにして child stdout との多重化をシングルスレッドで回す。
     // timeout はレイテンシに直結する (child stdout の応答は ws.read の block 中に届くため、
-    // 転送まで最悪 timeout 分待つ)。#81 実測で 50ms poll が往復 +25ms (平均) を足していた
-    // ので 5ms に短縮。CPU は ~200 wake/s で無視できる。
-    // 併せて Nagle を切る (TCP_NODELAY) — JSONL の小さいフレームが ACK 待ちで
-    // 遅延バッファされるのを防ぐ。
+    // 転送まで最悪 timeout 分待つ)。50ms → 5ms の短縮 + TCP_NODELAY (Nagle の ACK 待ち
+    // バッファ回避) は #85 で導入。期待効果は平均 -25ms 程度で、#81 の再実測では海越え
+    // RTT の時間帯変動 (±150ms) に埋もれて有意差を確認できなかったが、原理上の遅延源
+    // なので残す (50ms に戻す理由も無い。CPU は ~200 wake/s で無視できる)。
     match ws.get_mut() {
         MaybeTlsStream::Plain(s) => {
             let _ = s.set_read_timeout(Some(Duration::from_millis(5)));

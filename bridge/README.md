@@ -27,11 +27,15 @@ npx chrome-devtools-mcp@latest \
   --wsEndpoint "wss://cdp-relay.ippoan.org/cdp/<session>/devtools/browser?token=<pair_code>"
 ```
 
-## MCP passthrough モード (`--mcp`、Refs #81) — 約 4 倍速い
+## MCP passthrough モード (`--mcp`、Refs #81) — 実測 2〜2.5 倍速い
 
 生 CDP を海越えで運ぶと 1 ツール呼び出し = CDP 4〜5 往復 (~236ms/往復、warm ~1.1s) に
 なる。`--mcp` は chrome-devtools-mcp を**手元で spawn** し、その stdio (JSONL) を
-`/mcpbridge/{session}` へパイプする — 1 ツール = 1 往復 (~0.3s) で済む。
+`/mcpbridge/{session}` へパイプする — 1 ツール = 1 往復。
+
+実測 (#81、2026-07-10): **1 ツール 0.4〜0.6s (回線状況依存) = 2〜2.5 倍**、接続確立は
+8s → 0.3〜0.4s。理論値 ~0.3s との差は海越え RTT の時間帯変動 (±150ms) に埋もれて分解
+不能だったため、これ以上の短縮はエージェント自体を手元で動かす (cc-webreview-ext 系) の領分。
 
 手元での bridge 起動は 3 通り (どれも chrome-devtools-mcp が npm パッケージのため npx =
 Node.js は必要):
