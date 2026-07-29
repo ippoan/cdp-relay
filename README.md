@@ -93,7 +93,9 @@ NAT+FW を越える必要があり不可。唯一通る WSS で、**両側 outbo
 ## MCP ツール
 
 `POST /mcp` で stateless Streamable HTTP を提供する。`@ippoan/mcp-cf-workers` の
-`createWorkerMcp` を使用 (`src/mcp/server.ts`)。実ロジックは `src/mcp/tools.ts`。
+`createWorkerMcpV2` を使用 (`src/mcp/server.ts`) — MCP 2.0 (2026-07-28) と legacy
+(2025 initialize) の両クライアントを同一エンドポイントで serve する
+(Refs ippoan/mcp-cf-workers#66)。実ロジックは `src/mcp/tools.ts`。
 
 - `browser_pair(session?, ttl_seconds?)` — 手元拡張を session にペアリングする**短命 pairing
   code** を発行 (`{ session, pair_code, expires_in_seconds, relay_url, pair_string }`)。静的 `RELAY_TOKEN`

@@ -20,7 +20,8 @@
   },
   "dependencies": {
     "@ippoan/mcp-cf-workers": "dev",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/server": "2.0.0",
     "zod": "^4.4.3"
   }
 }

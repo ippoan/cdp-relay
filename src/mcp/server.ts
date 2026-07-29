@@ -1,9 +1,12 @@
 /**
  * MCP transport 配線。
  *
- * @ippoan/mcp-cf-workers の `createWorkerMcp` (stateless Streamable HTTP) に
- * ツールを登録するだけの薄い 1 枚。実ロジックは `./tools` の純粋関数に置き、
- * ここはそれを MCP ツールとして公開するアダプタに徹する。
+ * @ippoan/mcp-cf-workers の `createWorkerMcpV2` (MCP 2026-07-28 / SDK v2、
+ * legacy 2025 クライアントも同一エンドポイントで serve) にツールを登録するだけの
+ * 薄い 1 枚。実ロジックは `./tools` の純粋関数に置き、ここはそれを MCP ツールとして
+ * 公開するアダプタに徹する。handler は module-scope で一度だけ生成する (v2 の
+ * memoize 設計に乗る)。SDK v2 の inputSchema は Standard Schema — v1 の raw shape
+ * ではなく `z.object({...})` を渡す (Refs ippoan/mcp-cf-workers#66)。
  *
  * 提供ツール:
  *   - browser_navigate(session, url) … 手元 Chrome を url に遷移させる
@@ -18,7 +21,7 @@
  * SDK (+ ajv) は workers-pool テスト loader と相性が悪いため、このモジュールは
  * `index.ts` から `/mcp` 到達時のみ遅延 import される。ロジックは `tools.ts` を直接テスト。
  */
-import { createWorkerMcp } from "@ippoan/mcp-cf-workers";
+import { createWorkerMcpV2 } from "@ippoan/mcp-cf-workers";
 import { z } from "zod";
 import type { Env } from "../env";
 import {
@@ -43,248 +46,250 @@ function fail(e: unknown): ToolResult {
   return { content: [{ type: "text", text: JSON.stringify({ error: message }) }], isError: true };
 }
 
+// module-scope で一度だけ生成 (v2 の memoize 設計に乗る)。tool 実装は env を
+// registerTools の第2引数から受ける (per-request closure は作らない)。
+const handler = createWorkerMcpV2<Env>({
+  name: "cdp-relay",
+  version: "0.1.0",
+  registerTools: (server, env) => {
+    server.registerTool(
+      "browser_pair",
+      {
+        description:
+          "手元 Chrome の MV3 拡張をこの session にペアリングするための短命 pairing code を発行する。" +
+          "返り値の `pair_string` (cdp1.… の 1 文字列) を拡張 popup の「接続文字列（1コピペ）」欄に貼るだけで " +
+          "Relay URL / Session / Token が自動入力され接続まで走る (3 欄個別貼りも従来通り可)。" +
+          "接続すると その session の DO に拡張 WS が合流し、以降 browser_navigate / browser_screenshot / browser_eval / browser_stash が使える。" +
+          "pair_code は短命 (既定 15 分) で session 単位。静的 RELAY_TOKEN を人手で調べる代わりに使う。",
+        inputSchema: z.object({
+          session: z
+            .string()
+            .optional()
+            .describe("ペアリング先 session 名。省略時はランダム採番 (pair-xxxxxxxx)"),
+          ttl_seconds: z
+            .number()
+            .optional()
+            .describe("pair_code の有効秒数 (既定 900、最大 86400)"),
+        }),
+      },
+      async ({ session, ttl_seconds }: { session?: string; ttl_seconds?: number }) => {
+        try {
+          return ok(await browserPair(env, session, ttl_seconds));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+
+    server.registerTool(
+      "browser_cdp_endpoint",
+      {
+        description:
+          "chrome-devtools-mcp を cdp-relay 経由で手元 Chrome に繋ぐ一式を発行する (生 CDP passthrough)。" +
+          "curated な browser_navigate/eval 等 (chrome.debugger のタブ単位・厳選 verb) と違い、" +
+          "手元 bridge が実 Chrome の browser-level CDP (--remote-debugging-port=9222) を中継し、" +
+          "CCoW の chrome-devtools-mcp が --wsEndpoint で合流するので **chrome-devtools-mcp の全ツール** が効く。" +
+          "返り値: ws_endpoint / bridge_command / chrome_devtools_mcp_command / pair_string。" +
+          "手元 bridge は 2 通り: **(A 推奨) 拡張だけで完結** — Chrome を " +
+          "--remote-debugging-port=9222 --remote-allow-origins=chrome-extension://<拡張 id> " +
+          "(この起動フラグは拡張 popup が CDP passthrough ON 時にコピー可能な形で表示。`*` は全 origin 許可 " +
+          "= デバッグポート乗っ取りに繋がるため使わない) で起動し、pair_string を拡張 popup の " +
+          "「接続文字列（1コピペ）」欄に貼る (node 不要、拡張 SW が bridge になる)。" +
+          "**(B) node bridge** — Chrome を --remote-debugging-port=9222 で起動し bridge_command を実行。" +
+          "どちらも最後に CCoW で chrome_devtools_mcp_command を実行。pair_code は短命 (既定 15 分)・session スコープ。",
+        inputSchema: z.object({
+          session: z
+            .string()
+            .optional()
+            .describe("ペアリング先 session 名。省略時はランダム採番 (pair-xxxxxxxx)"),
+          ttl_seconds: z
+            .number()
+            .optional()
+            .describe("pair_code の有効秒数 (既定 900、最大 86400)"),
+        }),
+      },
+      async ({ session, ttl_seconds }: { session?: string; ttl_seconds?: number }) => {
+        try {
+          return ok(await browserCdpEndpoint(env, session, ttl_seconds));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+
+    server.registerTool(
+      "browser_mcp_endpoint",
+      {
+        description:
+          "MCP passthrough (高速版) の一式を発行する。chrome-devtools-mcp を **手元で** 動かし、" +
+          "MCP JSON-RPC (1 ツール呼び出し = 太平洋横断 1 往復、実測 0.4〜0.6s) だけを relay する — " +
+          "browser_cdp_endpoint (生 CDP、1 ツール = 4〜5 往復 ≈ 1.1s) の 2〜2.5 倍速く、" +
+          "chrome-devtools-mcp の全ツールが同じように効く。操作を連打するワークロードではこちらを推奨。" +
+          "返り値: ws_endpoint / bridge_command / bootstrap_command / pair_string / claude_mcp_add_command。手順: " +
+          "(1) 手元 Chrome を --remote-debugging-port=9222 --user-data-dir=<非デフォルト> で起動 " +
+          "(Chrome 136+ はデフォルト profile への debug port を無視する)。" +
+          "(2) 手元で bridge を起動 — 優先順: **(a) cdp-agent (MSI) 導入済みなら pair_string を拡張 popup に" +
+          "貼って「MCP bridge 起動」ボタン** (nmhost 経由、#83)。(b) repo clone 無しなら bootstrap_command " +
+          "(raw curl + node)。(c) clone 済みなら bridge_command。いずれも chrome-devtools-mcp が npm パッケージの" +
+          "ため手元に npx (Node.js) は必要。" +
+          "(3) CCoW で claude_mcp_add_command を実行 (次 session から有効)。" +
+          "pair_code は短命 (既定 15 分)・session スコープ。",
+        inputSchema: z.object({
+          session: z
+            .string()
+            .optional()
+            .describe("ペアリング先 session 名。省略時はランダム採番 (pair-xxxxxxxx)"),
+          ttl_seconds: z
+            .number()
+            .optional()
+            .describe("pair_code の有効秒数 (既定 900、最大 86400)"),
+        }),
+      },
+      async ({ session, ttl_seconds }: { session?: string; ttl_seconds?: number }) => {
+        try {
+          return ok(await browserMcpEndpoint(env, session, ttl_seconds));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+
+    server.registerTool(
+      "browser_navigate",
+      {
+        description:
+          "手元 Chrome (cdp-relay MV3 拡張が接続している session) を指定 URL に遷移させる。" +
+          "url は http:// または https:// で始まること。拡張が Page.navigate を実行し、" +
+          "load 完了後に { url } を返す。拡張が未接続なら extension_not_connected エラー。",
+        inputSchema: z.object({
+          session: z.string().describe("拡張接続の session 名 (pair flow で手元に渡したもの)"),
+          url: z.string().describe("遷移先 URL (http(s) のみ)"),
+        }),
+      },
+      async ({ session, url }: { session: string; url: string }) => {
+        try {
+          return ok(await browserNavigate(env, session, url));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+
+    server.registerTool(
+      "browser_screenshot",
+      {
+        description:
+          "手元 Chrome の現在の viewport を PNG で撮る。PNG 本体は MCP に載せず " +
+          "(token 浪費回避)、{ shot_url } だけを返す。取得は `curl -o /tmp/shot.png <shot_url>` → Read。" +
+          "shot_url は短命 (既定 5 分)。拡張が未接続なら extension_not_connected エラー。",
+        inputSchema: z.object({
+          session: z.string().describe("拡張接続の session 名"),
+        }),
+      },
+      async ({ session }: { session: string }) => {
+        try {
+          return ok(await browserScreenshot(env, session));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+
+    server.registerTool(
+      "browser_eval",
+      {
+        description:
+          "手元 Chrome の現在ページで JavaScript 式を評価し結果値を返す。" +
+          "text 取得は `document.body.innerText`、特定要素は `document.querySelector('sel')?.innerText` 等。" +
+          "PNG と違い値は小さいので shot_url ではなく { value } を直接返す。" +
+          "拡張が未接続なら extension_not_connected エラー。",
+        inputSchema: z.object({
+          session: z.string().describe("拡張接続の session 名"),
+          expression: z.string().describe("評価する JavaScript 式"),
+        }),
+      },
+      async ({ session, expression }: { session: string; expression: string }) => {
+        try {
+          return ok(await browserEval(env, session, expression));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+
+    server.registerTool(
+      "browser_stash",
+      {
+        description:
+          "手元 Chrome で JavaScript 式を評価し、結果 (文字列) を一時保存して回収用 URL を返す。" +
+          "browser_eval と違い結果値を MCP body に載せないので、localStorage dump や gzip+base64 等の " +
+          "大きな値を Claude の context を経由させず `curl -o /tmp/out.txt <stash_url>` でコンテナに落とせる " +
+          "(context 経由 + Write だと長大な base64 を逐語再生できず壊れる)。stash_url は短命 (既定 5 分) / " +
+          "無認証 (予測不能 id)。文字列以外を返す式は JSON 文字列化して保存する。" +
+          "**大きな値 (1MiB 超) は DO 内部で自動 chunk 分割保存され、stash_url の GET が連結配信するので " +
+          "回収は単一 URL の `curl -o` 1 回で済む** (手動 substr 分割は不要、最大 64MiB)。" +
+          "拡張未接続なら extension_not_connected。",
+        inputSchema: z.object({
+          session: z.string().describe("拡張接続の session 名"),
+          expression: z
+            .string()
+            .describe("評価する JavaScript 式 (大きな文字列/JSON を返すこと)"),
+          content_type: z
+            .string()
+            .optional()
+            .describe("保存時の Content-Type (既定 text/plain; charset=utf-8)"),
+        }),
+      },
+      async ({
+        session,
+        expression,
+        content_type,
+      }: {
+        session: string;
+        expression: string;
+        content_type?: string;
+      }) => {
+        try {
+          return ok(await browserStash(env, session, expression, content_type));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+
+    server.registerTool(
+      "browser_cookies",
+      {
+        description:
+          "手元 Chrome で **対象 origin の cookie を取得** し、回収用 URL ({ cookies_url }) を返す。" +
+          "用途: 手元ブラウザでサイトに login した後の session cookie を CCoW 側が借り、login " +
+          "(credential を使う部分) をスキップして認証後の操作 (検索/ダウンロード等) を回すため。" +
+          "credential は『手元ブラウザ → サイト』の手元 egress だけを通り、CCoW / egress gateway を " +
+          "一切通らない (gateway の TLS MITM で credential が平文化される問題を回避)。" +
+          "cookie 生値は MCP body に載せず、`curl -o /tmp/cookies.json <cookies_url>` で回収する " +
+          "(cookie は session capability なので context に残さない)。Network.getCookies なので " +
+          "HttpOnly な JSESSIONID 等も取れる。**urls は必須** (対象 origin に絞り、手元の全 cookie を " +
+          "吸い上げない)。この方式で検証できるのは『cookie での認証後操作』のみで、login 実装自体は " +
+          "検証されない点に注意。拡張が未接続なら extension_not_connected。",
+        inputSchema: z.object({
+          session: z.string().describe("拡張接続の session 名"),
+          urls: z
+            .array(z.string())
+            .describe("cookie を取得する対象 URL/origin (例: ['https://www.etc-meisai.jp'])。必須・空不可"),
+        }),
+      },
+      async ({ session, urls }: { session: string; urls: string[] }) => {
+        try {
+          return ok(await browserCookies(env, session, urls));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    );
+  },
+});
+
 /** `/mcp` に mount する stateless ハンドラ。 */
 export async function handleMcp(request: Request, env: Env): Promise<Response> {
-  const handler = createWorkerMcp<Env>({
-    name: "cdp-relay",
-    version: "0.1.0",
-    registerTools: (server) => {
-      server.registerTool(
-        "browser_pair",
-        {
-          description:
-            "手元 Chrome の MV3 拡張をこの session にペアリングするための短命 pairing code を発行する。" +
-            "返り値の `pair_string` (cdp1.… の 1 文字列) を拡張 popup の「接続文字列（1コピペ）」欄に貼るだけで " +
-            "Relay URL / Session / Token が自動入力され接続まで走る (3 欄個別貼りも従来通り可)。" +
-            "接続すると その session の DO に拡張 WS が合流し、以降 browser_navigate / browser_screenshot / browser_eval / browser_stash が使える。" +
-            "pair_code は短命 (既定 15 分) で session 単位。静的 RELAY_TOKEN を人手で調べる代わりに使う。",
-          inputSchema: {
-            session: z
-              .string()
-              .optional()
-              .describe("ペアリング先 session 名。省略時はランダム採番 (pair-xxxxxxxx)"),
-            ttl_seconds: z
-              .number()
-              .optional()
-              .describe("pair_code の有効秒数 (既定 900、最大 86400)"),
-          },
-        },
-        async ({ session, ttl_seconds }: { session?: string; ttl_seconds?: number }) => {
-          try {
-            return ok(await browserPair(env, session, ttl_seconds));
-          } catch (e) {
-            return fail(e);
-          }
-        },
-      );
-
-      server.registerTool(
-        "browser_cdp_endpoint",
-        {
-          description:
-            "chrome-devtools-mcp を cdp-relay 経由で手元 Chrome に繋ぐ一式を発行する (生 CDP passthrough)。" +
-            "curated な browser_navigate/eval 等 (chrome.debugger のタブ単位・厳選 verb) と違い、" +
-            "手元 bridge が実 Chrome の browser-level CDP (--remote-debugging-port=9222) を中継し、" +
-            "CCoW の chrome-devtools-mcp が --wsEndpoint で合流するので **chrome-devtools-mcp の全ツール** が効く。" +
-            "返り値: ws_endpoint / bridge_command / chrome_devtools_mcp_command / pair_string。" +
-            "手元 bridge は 2 通り: **(A 推奨) 拡張だけで完結** — Chrome を " +
-            "--remote-debugging-port=9222 --remote-allow-origins=chrome-extension://<拡張 id> " +
-            "(この起動フラグは拡張 popup が CDP passthrough ON 時にコピー可能な形で表示。`*` は全 origin 許可 " +
-            "= デバッグポート乗っ取りに繋がるため使わない) で起動し、pair_string を拡張 popup の " +
-            "「接続文字列（1コピペ）」欄に貼る (node 不要、拡張 SW が bridge になる)。" +
-            "**(B) node bridge** — Chrome を --remote-debugging-port=9222 で起動し bridge_command を実行。" +
-            "どちらも最後に CCoW で chrome_devtools_mcp_command を実行。pair_code は短命 (既定 15 分)・session スコープ。",
-          inputSchema: {
-            session: z
-              .string()
-              .optional()
-              .describe("ペアリング先 session 名。省略時はランダム採番 (pair-xxxxxxxx)"),
-            ttl_seconds: z
-              .number()
-              .optional()
-              .describe("pair_code の有効秒数 (既定 900、最大 86400)"),
-          },
-        },
-        async ({ session, ttl_seconds }: { session?: string; ttl_seconds?: number }) => {
-          try {
-            return ok(await browserCdpEndpoint(env, session, ttl_seconds));
-          } catch (e) {
-            return fail(e);
-          }
-        },
-      );
-
-      server.registerTool(
-        "browser_mcp_endpoint",
-        {
-          description:
-            "MCP passthrough (高速版) の一式を発行する。chrome-devtools-mcp を **手元で** 動かし、" +
-            "MCP JSON-RPC (1 ツール呼び出し = 太平洋横断 1 往復、実測 0.4〜0.6s) だけを relay する — " +
-            "browser_cdp_endpoint (生 CDP、1 ツール = 4〜5 往復 ≈ 1.1s) の 2〜2.5 倍速く、" +
-            "chrome-devtools-mcp の全ツールが同じように効く。操作を連打するワークロードではこちらを推奨。" +
-            "返り値: ws_endpoint / bridge_command / bootstrap_command / pair_string / claude_mcp_add_command。手順: " +
-            "(1) 手元 Chrome を --remote-debugging-port=9222 --user-data-dir=<非デフォルト> で起動 " +
-            "(Chrome 136+ はデフォルト profile への debug port を無視する)。" +
-            "(2) 手元で bridge を起動 — 優先順: **(a) cdp-agent (MSI) 導入済みなら pair_string を拡張 popup に" +
-            "貼って「MCP bridge 起動」ボタン** (nmhost 経由、#83)。(b) repo clone 無しなら bootstrap_command " +
-            "(raw curl + node)。(c) clone 済みなら bridge_command。いずれも chrome-devtools-mcp が npm パッケージの" +
-            "ため手元に npx (Node.js) は必要。" +
-            "(3) CCoW で claude_mcp_add_command を実行 (次 session から有効)。" +
-            "pair_code は短命 (既定 15 分)・session スコープ。",
-          inputSchema: {
-            session: z
-              .string()
-              .optional()
-              .describe("ペアリング先 session 名。省略時はランダム採番 (pair-xxxxxxxx)"),
-            ttl_seconds: z
-              .number()
-              .optional()
-              .describe("pair_code の有効秒数 (既定 900、最大 86400)"),
-          },
-        },
-        async ({ session, ttl_seconds }: { session?: string; ttl_seconds?: number }) => {
-          try {
-            return ok(await browserMcpEndpoint(env, session, ttl_seconds));
-          } catch (e) {
-            return fail(e);
-          }
-        },
-      );
-
-      server.registerTool(
-        "browser_navigate",
-        {
-          description:
-            "手元 Chrome (cdp-relay MV3 拡張が接続している session) を指定 URL に遷移させる。" +
-            "url は http:// または https:// で始まること。拡張が Page.navigate を実行し、" +
-            "load 完了後に { url } を返す。拡張が未接続なら extension_not_connected エラー。",
-          inputSchema: {
-            session: z.string().describe("拡張接続の session 名 (pair flow で手元に渡したもの)"),
-            url: z.string().describe("遷移先 URL (http(s) のみ)"),
-          },
-        },
-        async ({ session, url }: { session: string; url: string }) => {
-          try {
-            return ok(await browserNavigate(env, session, url));
-          } catch (e) {
-            return fail(e);
-          }
-        },
-      );
-
-      server.registerTool(
-        "browser_screenshot",
-        {
-          description:
-            "手元 Chrome の現在の viewport を PNG で撮る。PNG 本体は MCP に載せず " +
-            "(token 浪費回避)、{ shot_url } だけを返す。取得は `curl -o /tmp/shot.png <shot_url>` → Read。" +
-            "shot_url は短命 (既定 5 分)。拡張が未接続なら extension_not_connected エラー。",
-          inputSchema: {
-            session: z.string().describe("拡張接続の session 名"),
-          },
-        },
-        async ({ session }: { session: string }) => {
-          try {
-            return ok(await browserScreenshot(env, session));
-          } catch (e) {
-            return fail(e);
-          }
-        },
-      );
-
-      server.registerTool(
-        "browser_eval",
-        {
-          description:
-            "手元 Chrome の現在ページで JavaScript 式を評価し結果値を返す。" +
-            "text 取得は `document.body.innerText`、特定要素は `document.querySelector('sel')?.innerText` 等。" +
-            "PNG と違い値は小さいので shot_url ではなく { value } を直接返す。" +
-            "拡張が未接続なら extension_not_connected エラー。",
-          inputSchema: {
-            session: z.string().describe("拡張接続の session 名"),
-            expression: z.string().describe("評価する JavaScript 式"),
-          },
-        },
-        async ({ session, expression }: { session: string; expression: string }) => {
-          try {
-            return ok(await browserEval(env, session, expression));
-          } catch (e) {
-            return fail(e);
-          }
-        },
-      );
-
-      server.registerTool(
-        "browser_stash",
-        {
-          description:
-            "手元 Chrome で JavaScript 式を評価し、結果 (文字列) を一時保存して回収用 URL を返す。" +
-            "browser_eval と違い結果値を MCP body に載せないので、localStorage dump や gzip+base64 等の " +
-            "大きな値を Claude の context を経由させず `curl -o /tmp/out.txt <stash_url>` でコンテナに落とせる " +
-            "(context 経由 + Write だと長大な base64 を逐語再生できず壊れる)。stash_url は短命 (既定 5 分) / " +
-            "無認証 (予測不能 id)。文字列以外を返す式は JSON 文字列化して保存する。" +
-            "**大きな値 (1MiB 超) は DO 内部で自動 chunk 分割保存され、stash_url の GET が連結配信するので " +
-            "回収は単一 URL の `curl -o` 1 回で済む** (手動 substr 分割は不要、最大 64MiB)。" +
-            "拡張未接続なら extension_not_connected。",
-          inputSchema: {
-            session: z.string().describe("拡張接続の session 名"),
-            expression: z
-              .string()
-              .describe("評価する JavaScript 式 (大きな文字列/JSON を返すこと)"),
-            content_type: z
-              .string()
-              .optional()
-              .describe("保存時の Content-Type (既定 text/plain; charset=utf-8)"),
-          },
-        },
-        async ({
-          session,
-          expression,
-          content_type,
-        }: {
-          session: string;
-          expression: string;
-          content_type?: string;
-        }) => {
-          try {
-            return ok(await browserStash(env, session, expression, content_type));
-          } catch (e) {
-            return fail(e);
-          }
-        },
-      );
-
-      server.registerTool(
-        "browser_cookies",
-        {
-          description:
-            "手元 Chrome で **対象 origin の cookie を取得** し、回収用 URL ({ cookies_url }) を返す。" +
-            "用途: 手元ブラウザでサイトに login した後の session cookie を CCoW 側が借り、login " +
-            "(credential を使う部分) をスキップして認証後の操作 (検索/ダウンロード等) を回すため。" +
-            "credential は『手元ブラウザ → サイト』の手元 egress だけを通り、CCoW / egress gateway を " +
-            "一切通らない (gateway の TLS MITM で credential が平文化される問題を回避)。" +
-            "cookie 生値は MCP body に載せず、`curl -o /tmp/cookies.json <cookies_url>` で回収する " +
-            "(cookie は session capability なので context に残さない)。Network.getCookies なので " +
-            "HttpOnly な JSESSIONID 等も取れる。**urls は必須** (対象 origin に絞り、手元の全 cookie を " +
-            "吸い上げない)。この方式で検証できるのは『cookie での認証後操作』のみで、login 実装自体は " +
-            "検証されない点に注意。拡張が未接続なら extension_not_connected。",
-          inputSchema: {
-            session: z.string().describe("拡張接続の session 名"),
-            urls: z
-              .array(z.string())
-              .describe("cookie を取得する対象 URL/origin (例: ['https://www.etc-meisai.jp'])。必須・空不可"),
-          },
-        },
-        async ({ session, urls }: { session: string; urls: string[] }) => {
-          try {
-            return ok(await browserCookies(env, session, urls));
-          } catch (e) {
-            return fail(e);
-          }
-        },
-      );
-    },
-  });
-
   return handler(request, env);
 }
