@@ -14,7 +14,7 @@ description: ippoan/cdp-relay (CCoW の隔離コンテナから手元 Chrome を
 | `src/index.ts` | Worker エントリ。token 検証 + session (idFromName) で DO へ振り分け |
 | `src/do/browser-session-do.ts` | `BrowserSessionDO`。拡張 WS hold + `/cmd` 往復 + `/shot` 保存配信 |
 | `src/mcp/tools.ts` | MCP ツールの純粋ロジック (`browser_navigate` / `browser_screenshot` / `browser_eval` / `browser_stash` / `browser_cookies`) |
-| `src/mcp/server.ts` | `createWorkerMcp` 配線 (`/mcp` 到達時のみ遅延 import) |
+| `src/mcp/server.ts` | `createWorkerMcpV2` 配線 (MCP 2026-07-28 + legacy 両対応、`/mcp` 到達時のみ遅延 import。handler は module-scope 生成、inputSchema は `z.object` の Standard Schema) |
 | `src/lib/auth.ts` | `RELAY_TOKEN` の constant-time 検証 |
 | `src/env.ts` | binding + 設定値 (vars から数値化) |
 | `extension/` | MV3 拡張 (manifest / background SW / popup)。手元 Chrome に load する |
